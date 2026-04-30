@@ -2,7 +2,7 @@
 
 import pytest
 
-from abay_assistant.bot.handlers import _md_to_html, _serialize_content, _detect_unlinked_crm_mentions
+from abay_assistant.bot.handlers import _md_to_html, _serialize_content, _detect_unlinked_crm_mentions, _split_message
 
 
 def test_md_to_html_bold():
@@ -96,3 +96,30 @@ def test_detect_unlinked_name_not_in_text():
     llm_response = "ОК"
     result = _detect_unlinked_crm_mentions(user_text, crm_names, llm_response)
     assert len(result) == 0
+
+
+# ─────────────────────────────────────────────
+# _split_message
+# ─────────────────────────────────────────────
+
+def test_split_message_short():
+    """Short messages not split."""
+    assert _split_message("Привет", 100) == ["Привет"]
+
+
+def test_split_message_long():
+    """Long messages split by paragraphs."""
+    text = "Абзац 1\n\nАбзац 2\n\nАбзац 3"
+    parts = _split_message(text, 20)
+    assert len(parts) >= 2
+    # All original text preserved
+    assert "Абзац 1" in "".join(parts)
+    assert "Абзац 3" in "".join(parts)
+
+
+def test_split_message_single_long_line():
+    """Single line longer than limit gets truncated."""
+    text = "A" * 200
+    parts = _split_message(text, 50)
+    assert len(parts) >= 1
+    assert len(parts[0]) <= 50

@@ -166,16 +166,39 @@ async def _send_with_retry(coro_factory, max_retries: int = 3) -> None:
     await coro_factory()
 
 
+TG_MSG_LIMIT = 4000  # Telegram limit 4096, с запасом на HTML-теги
+
+
+def _split_message(text: str, limit: int = TG_MSG_LIMIT) -> list[str]:
+    """Разбить длинное сообщение на части по абзацам."""
+    if len(text) <= limit:
+        return [text]
+
+    parts = []
+    current = ""
+    for line in text.split("\n"):
+        if len(current) + len(line) + 1 > limit:
+            if current:
+                parts.append(current)
+            current = line[:limit]  # на случай одной строки > limit
+        else:
+            current = current + "\n" + line if current else line
+    if current:
+        parts.append(current)
+    return parts or [text[:limit]]
+
+
 async def _send_reply(message: TgMessage, text: str) -> None:
-    """Отправить ответ с HTML-форматированием, fallback на plain text."""
-    html = _md_to_html(text)
-    try:
-        await _send_with_retry(lambda: message.answer(html, parse_mode=ParseMode.HTML))
-    except Exception:
+    """Отправить ответ с HTML-форматированием, разбивая длинные сообщения."""
+    for chunk in _split_message(text):
+        html = _md_to_html(chunk)
         try:
-            await message.answer(text)
-        except Exception as e:
-            logger.error("Не удалось отправить сообщение: {}", e)
+            await _send_with_retry(lambda h=html: message.answer(h, parse_mode=ParseMode.HTML))
+        except Exception:
+            try:
+                await message.answer(chunk)
+            except Exception as e:
+                logger.error("Не удалось отправить сообщение: {}", e)
 
 
 @router.message(CommandStart())
