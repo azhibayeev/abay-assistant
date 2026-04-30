@@ -506,7 +506,11 @@ async def _process_inbox(message: TgMessage, role: str, text: str) -> None:
     # 3. Системный промпт
     system = _build_system_prompt(role)
 
-    # 4. Вызов LLM с tools
+    # 4. Для длинных сообщений — показать статус
+    if len(text) > 500:
+        await message.answer("Обрабатываю...")
+
+    # 5. Вызов LLM с tools
     try:
         resp = await _llm.chat_with_tools(
             messages=llm_messages,
@@ -524,7 +528,7 @@ async def _process_inbox(message: TgMessage, role: str, text: str) -> None:
             await message.answer("Произошла ошибка при обработке. Попробуй ещё раз.")
         return
 
-    # 5. Обработка tool_use в цикле (до MAX_TOOL_ROUNDS раундов)
+    # 6. Обработка tool_use в цикле (до MAX_TOOL_ROUNDS раундов)
     context = {"telegram_id": tid}
     reply_text = await _process_response(resp, llm_messages, system, context)
 
@@ -550,15 +554,93 @@ async def _process_inbox(message: TgMessage, role: str, text: str) -> None:
     logger.info("Inbox: {} (role={}) → {}", tid, role, reply_text[:80] if reply_text else "(пусто)")
 
 
+def _truncate_tool_results(messages: list[dict], keep_recent: int = 2) -> list[dict]:
+    """Обрезать старые tool_result сообщения, оставив только последние N раундов полными.
+
+    Для ранних раундов заменяет content на краткие сводки, чтобы контекст не разрастался.
+    """
+    # Найти все пары assistant(tool_use) + user(tool_result)
+    tool_round_indices = []
+    for i, msg in enumerate(messages):
+        if msg["role"] == "user" and isinstance(msg.get("content"), list):
+            if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in msg["content"]):
+                tool_round_indices.append(i)
+
+    if len(tool_round_indices) <= keep_recent:
+        return messages
+
+    # Обрезать старые раунды
+    truncated = list(messages)
+    old_indices = tool_round_indices[:-keep_recent]
+    for idx in old_indices:
+        old_content = truncated[idx]["content"]
+        if not isinstance(old_content, list):
+            continue
+        short_results = []
+        for block in old_content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                original = block.get("content", "")
+                # Оставить только первые 100 символов результата
+                short = original[:100] + "..." if len(original) > 100 else original
+                short_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block["tool_use_id"],
+                    "content": short,
+                })
+            else:
+                short_results.append(block)
+        truncated[idx] = {"role": "user", "content": short_results}
+    return truncated
+
+
+def _build_actions_summary(actions: list[str]) -> str:
+    """Построить сводку выполненных действий для fallback-ответа."""
+    if not actions:
+        return "Выполнено."
+
+    lines = ["Выполнено:"]
+    for action in actions:
+        lines.append(f"• {action}")
+    return "\n".join(lines)
+
+
+# Названия инструментов → человекочитаемые описания
+_TOOL_DESCRIPTIONS = {
+    "create_trello_card": "Создана карточка: {name}",
+    "update_trello_card": "Обновлена карточка {card_id}",
+    "move_trello_card": "Перемещена карточка → {target_list}",
+    "add_trello_comment": "Комментарий к карточке {card_id}",
+    "add_checklist_item": "Пункт в чек-лист: {text}",
+    "get_trello_cards": "Загружены карточки: {list_name}",
+    "save_entity_note": "CRM: {entity_name}",
+    "update_entity_meta": "CRM мета: {entity_name}",
+    "set_reminder": "Напоминание: {text}",
+    "append_obsidian_daily": "Заметка в дневник",
+    "web_search": "Поиск: {query}",
+    "web_fetch": "Загрузка страницы",
+}
+
+
+def _describe_tool_action(tool_name: str, tool_input: dict) -> str:
+    """Человекочитаемое описание выполненного tool call."""
+    template = _TOOL_DESCRIPTIONS.get(tool_name, tool_name)
+    try:
+        return template.format(**tool_input)
+    except (KeyError, IndexError):
+        return tool_name
+
+
 async def _process_response(
     resp, messages: list[dict], system: str, context: dict | None = None
 ) -> str:
     """Обработать ответ LLM: выполнить tool calls если есть, вернуть финальный текст.
 
     Поддерживает до MAX_TOOL_ROUNDS раундов tool calls (для web_search → web_fetch цепочек).
+    При сбое финального LLM-вызова — возвращает сводку выполненных действий.
     """
     current_messages = list(messages)
     current_resp = resp
+    actions_done: list[str] = []  # Трекинг выполненных действий
 
     for _round in range(MAX_TOOL_ROUNDS):
         text_parts = []
@@ -586,12 +668,18 @@ async def _process_response(
                 "tool_use_id": tu.id,
                 "content": result,
             })
+            # Трекать действие (кроме get_trello_cards — это чтение)
+            if tu.name != "get_trello_cards":
+                actions_done.append(_describe_tool_action(tu.name, tu.input))
 
         # Добавить assistant response + tool results
         current_messages.append(
             {"role": "assistant", "content": _serialize_content(current_resp.content)}
         )
         current_messages.append({"role": "user", "content": tool_results})
+
+        # Обрезать старые tool results чтобы контекст не разрастался
+        current_messages = _truncate_tool_results(current_messages, keep_recent=2)
 
         # Вызвать LLM снова
         try:
@@ -602,14 +690,14 @@ async def _process_response(
             )
         except Exception as e:
             logger.error("LLM tool round {} ошибка: {}", _round + 1, e)
-            return "Выполнено."
+            return _build_actions_summary(actions_done)
 
     # Если все раунды израсходованы — собрать текст из последнего ответа
     final_texts = []
     for block in current_resp.content:
         if block.type == "text":
             final_texts.append(block.text)
-    return "\n".join(final_texts) if final_texts else "Выполнено."
+    return "\n".join(final_texts) if final_texts else _build_actions_summary(actions_done)
 
 
 def _serialize_content(content_blocks) -> list[dict]:

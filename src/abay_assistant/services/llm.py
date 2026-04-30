@@ -4,6 +4,7 @@ import asyncio
 from typing import Any
 
 import anthropic
+import httpx
 from loguru import logger
 
 from abay_assistant.config import get_settings
@@ -19,7 +20,8 @@ class LLMClient:
 
     def __init__(self) -> None:
         self._client = anthropic.AsyncAnthropic(
-            api_key=get_settings().anthropic_api_key
+            api_key=get_settings().anthropic_api_key,
+            timeout=httpx.Timeout(120.0, connect=10.0),
         )
 
     async def _retry(self, func, **kwargs) -> Any:

@@ -2,7 +2,15 @@
 
 import pytest
 
-from abay_assistant.bot.handlers import _md_to_html, _serialize_content, _detect_unlinked_crm_mentions, _split_message
+from abay_assistant.bot.handlers import (
+    _md_to_html,
+    _serialize_content,
+    _detect_unlinked_crm_mentions,
+    _split_message,
+    _truncate_tool_results,
+    _build_actions_summary,
+    _describe_tool_action,
+)
 
 
 def test_md_to_html_bold():
@@ -123,3 +131,61 @@ def test_split_message_single_long_line():
     parts = _split_message(text, 50)
     assert len(parts) >= 1
     assert len(parts[0]) <= 50
+
+
+# ─────────────────────────────────────────────
+# _truncate_tool_results
+# ─────────────────────────────────────────────
+
+def test_truncate_tool_results_few_rounds():
+    """With few rounds, messages are unchanged."""
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+    ]
+    result = _truncate_tool_results(messages, keep_recent=2)
+    assert result == messages
+
+
+def test_truncate_tool_results_many_rounds():
+    """Old tool results get truncated, recent ones stay full."""
+    long_result = "A" * 500
+    messages = [
+        {"role": "user", "content": "hello"},
+        # Round 1
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t1"}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": long_result}]},
+        # Round 2
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t2"}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t2", "content": long_result}]},
+        # Round 3
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t3"}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t3", "content": long_result}]},
+    ]
+    result = _truncate_tool_results(messages, keep_recent=2)
+    # Round 1 should be truncated
+    r1_content = result[2]["content"][0]["content"]
+    assert len(r1_content) <= 104  # 100 chars + "..."
+    # Round 3 should be full
+    r3_content = result[6]["content"][0]["content"]
+    assert r3_content == long_result
+
+
+# ─────────────────────────────────────────────
+# _build_actions_summary / _describe_tool_action
+# ─────────────────────────────────────────────
+
+def test_build_actions_summary_empty():
+    assert _build_actions_summary([]) == "Выполнено."
+
+
+def test_build_actions_summary_with_actions():
+    result = _build_actions_summary(["CRM: Расул", "Напоминание: звонок"])
+    assert "CRM: Расул" in result
+    assert "Напоминание: звонок" in result
+    assert result.startswith("Выполнено:")
+
+
+def test_describe_tool_action():
+    assert "Расул" in _describe_tool_action("save_entity_note", {"entity_name": "Расул", "entity_type": "person", "content": "test"})
+    assert _describe_tool_action("unknown_tool", {}) == "unknown_tool"
