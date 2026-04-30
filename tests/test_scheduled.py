@@ -12,6 +12,9 @@ from abay_assistant.bot.scheduled import (
     _filter_forgotten_contacts,
     _find_stuck_cards,
     _compute_energy_insight,
+    _classify_due_date,
+    _format_week_name,
+    _find_month_list_name,
 )
 
 
@@ -192,3 +195,71 @@ def test_compute_energy_insight_high():
     ]
     result = _compute_energy_insight(stats, today_weekday=0, low_threshold=3.0)
     assert result is None
+
+
+# ─────────────────────────────────────────────
+# _classify_due_date
+# ─────────────────────────────────────────────
+
+def test_classify_due_date_today():
+    """Today's date → 'today'."""
+    today_str = date.today().isoformat()
+    assert _classify_due_date(today_str) == "today"
+
+
+def test_classify_due_date_overdue():
+    """Past date → 'today' (overdue goes to today)."""
+    past = (date.today() - timedelta(days=3)).isoformat()
+    assert _classify_due_date(past) == "today"
+
+
+def test_classify_due_date_this_week():
+    """Date within current week → 'week'."""
+    today = date.today()
+    # Find next day that's still this week (not today)
+    monday = today - timedelta(days=today.weekday())
+    sunday = monday + timedelta(days=6)
+    if today < sunday:
+        target = today + timedelta(days=1)
+        if target <= sunday:
+            assert _classify_due_date(target.isoformat()) == "week"
+
+
+def test_classify_due_date_invalid():
+    """Invalid date → None."""
+    assert _classify_due_date("not-a-date") is None
+    assert _classify_due_date("") is None
+
+
+# ─────────────────────────────────────────────
+# _format_week_name
+# ─────────────────────────────────────────────
+
+def test_format_week_name_same_month():
+    monday = date(2026, 5, 4)
+    sunday = date(2026, 5, 10)
+    result = _format_week_name(monday, sunday)
+    assert "4–10" in result
+    assert "мая" in result
+
+
+def test_format_week_name_cross_month():
+    monday = date(2026, 4, 27)
+    sunday = date(2026, 5, 3)
+    result = _format_week_name(monday, sunday)
+    assert "27" in result
+    assert "3" in result
+
+
+# ─────────────────────────────────────────────
+# _find_month_list_name
+# ─────────────────────────────────────────────
+
+def test_find_month_list_name_found():
+    lists = ["Сегодня", "Неделя 5-11 мая", "Май", "Backlog"]
+    assert _find_month_list_name(lists, 5) == "Май"
+
+
+def test_find_month_list_name_not_found():
+    lists = ["Сегодня", "Неделя", "Backlog"]
+    assert _find_month_list_name(lists, 6) is None

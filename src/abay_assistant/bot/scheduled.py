@@ -1,7 +1,9 @@
 """Обработчики расписания — утренняя сводка, полуденный чек-ин, вечерний свод, weekly-отчёт, напоминания, проактивные фичи."""
 
 import asyncio
+import calendar as cal_mod
 import json
+import re
 from collections import defaultdict
 from datetime import date as date_type, datetime, timedelta
 from pathlib import Path
@@ -631,3 +633,186 @@ async def stuck_tasks() -> None:
 
     except Exception as e:
         logger.error("Ошибка stuck_tasks: {}", e)
+
+
+# ─────────────────────────────────────────────
+# Названия месяцев (русские)
+# ─────────────────────────────────────────────
+
+_MONTH_NAMES = {
+    1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
+    5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
+    9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь",
+}
+
+_MONTH_NAMES_LOWER = {k: v.lower() for k, v in _MONTH_NAMES.items()}
+_MONTH_NAME_TO_NUM = {v: k for k, v in _MONTH_NAMES_LOWER.items()}
+
+
+def _get_current_week_range() -> tuple[date_type, date_type]:
+    """Получить начало (пн) и конец (вс) текущей недели."""
+    today = date_type.today()
+    monday = today - timedelta(days=today.weekday())
+    sunday = monday + timedelta(days=6)
+    return monday, sunday
+
+
+def _format_week_name(monday: date_type, sunday: date_type) -> str:
+    """Сформировать название колонки недели: 'Неделя 5–11 мая'."""
+    month_genitive = {
+        1: "янв.", 2: "фев.", 3: "мар.", 4: "апр.",
+        5: "мая", 6: "июня", 7: "июля", 8: "авг.",
+        9: "сен.", 10: "окт.", 11: "нояб.", 12: "дек.",
+    }
+    if monday.month == sunday.month:
+        return f"Неделя {monday.day}–{sunday.day} {month_genitive[monday.month]}"
+    return f"Неделя {monday.day} {month_genitive[monday.month]}–{sunday.day} {month_genitive[sunday.month]}"
+
+
+def _classify_due_date(due_str: str) -> str | None:
+    """Определить целевую колонку по дедлайну.
+
+    Возвращает: 'today', 'week', 'month', None (если дальше текущего месяца).
+    """
+    try:
+        due = datetime.fromisoformat(due_str.replace("Z", "+00:00")).date()
+    except (ValueError, TypeError):
+        return None
+
+    today = date_type.today()
+    if due <= today:
+        return "today"
+
+    monday, sunday = _get_current_week_range()
+    if due <= sunday:
+        return "week"
+
+    if due.year == today.year and due.month == today.month:
+        return "month"
+
+    return None  # дальше текущего месяца — не трогаем
+
+
+def _find_month_list_name(list_names: list[str], target_month: int) -> str | None:
+    """Найти колонку месяца среди существующих списков."""
+    target_lower = _MONTH_NAMES_LOWER.get(target_month, "")
+    if not target_lower:
+        return None
+    for name in list_names:
+        if target_lower in name.lower():
+            return name
+    return None
+
+
+# ─────────────────────────────────────────────
+# Ежедневно 8:30 — Авто-сортировка карточек
+# ─────────────────────────────────────────────
+
+async def sort_cards_by_due() -> None:
+    """Переместить карточки в правильные колонки по дедлайну.
+
+    - Просроченные / сегодня → Сегодня
+    - На этой неделе → Неделя
+    - В текущем месяце → колонка месяца (Май, Июнь и т.д.)
+    """
+    logger.info("Запуск sort_cards_by_due")
+    try:
+        lists = await _trello.get_lists()
+        list_names = list(lists.keys())
+        today = date_type.today()
+        month_list = _find_month_list_name(list_names, today.month)
+
+        # Маппинг list_id → list_name
+        id_to_name = {v: k for k, v in lists.items()}
+
+        # Получить все карточки
+        all_cards = await _trello.get_all_cards()
+        moved = 0
+
+        for card in all_cards:
+            due = card.get("due")
+            if not due:
+                continue
+
+            target = _classify_due_date(due)
+            if not target:
+                continue
+
+            card_list = id_to_name.get(card.get("idList"), "")
+
+            # Определить целевую колонку
+            if target == "today":
+                target_list = TrelloList.TODAY
+            elif target == "week":
+                target_list = TrelloList.WEEK
+            elif target == "month" and month_list:
+                target_list = month_list
+            else:
+                continue
+
+            # Не перемещать если уже в правильной колонке
+            target_list_lower = str(target_list).lower()
+            if target_list_lower in card_list.lower():
+                continue
+            # Не перемещать из "Готово", "Мяч на стороне", "Backlog"
+            skip_lists = ("готово", "мяч на стороне", "backlog", "изучить")
+            if any(s in card_list.lower() for s in skip_lists):
+                continue
+
+            try:
+                await _trello.move_card(card["id"], str(target_list))
+                moved += 1
+                logger.info("Sort: '{}' → '{}'", card["name"], target_list)
+            except Exception as e:
+                logger.error("Sort move error '{}': {}", card["name"], e)
+
+        logger.info("sort_cards_by_due: перемещено {} карточек", moved)
+
+    except Exception as e:
+        logger.error("Ошибка sort_cards_by_due: {}", e)
+
+
+# ─────────────────────────────────────────────
+# Понедельник 0:10 — Обновление названий колонок
+# ─────────────────────────────────────────────
+
+async def update_list_names() -> None:
+    """Обновить названия колонок: неделя (каждый пн), месяц (1-го числа)."""
+    logger.info("Запуск update_list_names")
+    try:
+        lists = await _trello.get_lists()
+        list_names = list(lists.keys())
+        today = date_type.today()
+
+        # 1. Обновить название колонки "Неделя"
+        monday, sunday = _get_current_week_range()
+        new_week_name = _format_week_name(monday, sunday)
+
+        # Найти текущую колонку недели
+        week_list = None
+        for name in list_names:
+            if "неделя" in name.lower():
+                week_list = name
+                break
+
+        if week_list and week_list != new_week_name:
+            await _trello.rename_list(week_list, new_week_name)
+            logger.info("Колонка недели: '{}' → '{}'", week_list, new_week_name)
+
+        # 2. Обновить колонку месяца (1-го числа)
+        if today.day <= 7:  # Первая неделя месяца — проверить
+            current_month_name = _MONTH_NAMES[today.month]
+            # Проверить, нет ли уже колонки текущего месяца
+            has_current = any(current_month_name.lower() in n.lower() for n in list_names)
+            if not has_current:
+                # Найти колонку прошлого месяца
+                prev_month = today.month - 1 if today.month > 1 else 12
+                prev_month_list = _find_month_list_name(list_names, prev_month)
+                if prev_month_list:
+                    await _trello.rename_list(prev_month_list, current_month_name)
+                    logger.info("Колонка месяца: '{}' → '{}'", prev_month_list, current_month_name)
+
+        logger.info("update_list_names завершено")
+
+    except Exception as e:
+        logger.error("Ошибка update_list_names: {}", e)

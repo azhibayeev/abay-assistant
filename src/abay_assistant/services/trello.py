@@ -191,6 +191,19 @@ class TrelloClient:
         )
         logger.info("Trello метка {} добавлена к карточке {}", label_id, card_id)
 
+    async def rename_list(self, list_name: str, new_name: str) -> dict:
+        """Переименовать список (колонку)."""
+        list_id = await self._list_id_by_name(list_name)
+        result = await self._request(
+            "PUT", f"/lists/{list_id}", params={"name": new_name}
+        )
+        # Обновить кеш
+        if list_name in self._lists_cache:
+            lid = self._lists_cache.pop(list_name)
+            self._lists_cache[new_name] = lid
+        logger.info("Trello список '{}' переименован в '{}'", list_name, new_name)
+        return result
+
     async def get_labels(self) -> list[dict]:
         """Получить метки доски."""
         labels = await self._request(
