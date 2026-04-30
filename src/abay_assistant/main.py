@@ -25,6 +25,7 @@ from abay_assistant.bot.scheduled import (
     cleanup_sessions,
     sort_cards_by_due,
     update_list_names,
+    card_nudge,
 )
 from abay_assistant.services.llm import LLMClient
 from abay_assistant.services.trello import TrelloClient
@@ -70,9 +71,12 @@ def setup_scheduler(scheduler: AsyncIOScheduler) -> None:
     scheduler.add_job(sort_cards_by_due, "cron", hour=8, minute=30)
     # Понедельник 0:10 — обновить названия колонок (неделя + месяц)
     scheduler.add_job(update_list_names, "cron", day_of_week="mon", hour=0, minute=10)
+    # 12:00 и 16:00 — напоминание по карточкам
+    scheduler.add_job(card_nudge, "cron", hour=12, minute=0)
+    scheduler.add_job(card_nudge, "cron", hour=16, minute=0)
     logger.info(
-        "Расписание: 8:30 sort, 9:00 утро, 14:00 чек-ин, 20:00 stuck, 22:30 вечер, "
-        "пн 0:10 list-names, вс 20:00 контакты, вс 21:00 weekly, "
+        "Расписание: 8:30 sort, 9:00 утро, 12/16 nudge, 14:00 чек-ин, 20:00 stuck, "
+        "22:30 вечер, пн 0:10 list-names, вс 20:00 контакты, вс 21:00 weekly, "
         "meeting_prep/5мин, напоминания/60с (Asia/Almaty)"
     )
 

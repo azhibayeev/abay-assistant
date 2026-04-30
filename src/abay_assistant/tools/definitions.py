@@ -341,6 +341,32 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "create_calendar_event",
+        "description": (
+            "Создать событие в Google Calendar. "
+            "Используй когда пользователь просит запланировать встречу, звонок, дедлайн. "
+            "Время указывай в часовом поясе Алматы (UTC+5)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "Название события (встреча с Расулом, звонок с Али и т.д.)",
+                },
+                "start": {
+                    "type": "string",
+                    "description": "Начало в ISO 8601 (YYYY-MM-DDTHH:MM:SS), локальное время Алматы",
+                },
+                "end": {
+                    "type": "string",
+                    "description": "Конец в ISO 8601 (YYYY-MM-DDTHH:MM:SS). Если не указано — +1 час от начала",
+                },
+            },
+            "required": ["summary", "start"],
+        },
+    },
+    {
         "name": "request_clarification",
         "description": (
             "Задать уточняющий вопрос пользователю. "

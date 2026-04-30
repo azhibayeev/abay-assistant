@@ -636,6 +636,59 @@ async def stuck_tasks() -> None:
 
 
 # ─────────────────────────────────────────────
+# 12:00, 16:00 — Напоминание по карточкам
+# ─────────────────────────────────────────────
+
+async def card_nudge() -> None:
+    """Выбрать 2-3 карточки из «Сегодня» и спросить статус."""
+    logger.info("Запуск card_nudge")
+    try:
+        s = get_settings()
+        cards = await _trello.get_cards(TrelloList.TODAY)
+        if not cards:
+            return
+
+        # Выбрать карточки с дедлайном на сегодня или просроченные
+        now = datetime.now()
+        today_str = now.strftime("%Y-%m-%d")
+        urgent = []
+        rest = []
+
+        for c in cards:
+            due = c.get("due", "")
+            if due and due[:10] <= today_str:
+                urgent.append(c["name"])
+            else:
+                rest.append(c["name"])
+
+        # Показать до 3 срочных, если мало — добрать из остальных
+        nudge_cards = urgent[:3]
+        if len(nudge_cards) < 3:
+            nudge_cards += rest[:3 - len(nudge_cards)]
+
+        if not nudge_cards:
+            return
+
+        hour = now.hour
+        if hour < 14:
+            greeting = "Полдня позади."
+        else:
+            greeting = "День идёт к концу."
+
+        lines = [f"{greeting} Как дела с задачами?\n"]
+        for name in nudge_cards:
+            lines.append(f"  — {name}")
+        lines.append(f"\nВсего в «Сегодня»: {len(cards)}")
+        lines.append("Скинь апдейт или скажи что перенести.")
+
+        await _bot.send_message(s.telegram_owner_id, "\n".join(lines))
+        logger.info("card_nudge: отправлено ({} карточек)", len(nudge_cards))
+
+    except Exception as e:
+        logger.error("Ошибка card_nudge: {}", e)
+
+
+# ─────────────────────────────────────────────
 # Названия месяцев (русские)
 # ─────────────────────────────────────────────
 

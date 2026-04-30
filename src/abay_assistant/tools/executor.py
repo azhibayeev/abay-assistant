@@ -8,6 +8,7 @@ from loguru import logger
 
 from abay_assistant.services.trello import TrelloClient
 from abay_assistant.services.obsidian import ObsidianClient
+from abay_assistant.services.calendar import CalendarClient
 from abay_assistant.services.web import web_search, web_fetch
 from abay_assistant.db import create_reminder, log_tool_usage
 
@@ -17,9 +18,15 @@ LABELS_CACHE_TTL = timedelta(minutes=5)
 class ToolExecutor:
     """Принимает tool_use блок от Claude, вызывает нужный сервис."""
 
-    def __init__(self, trello: TrelloClient, obsidian: ObsidianClient) -> None:
+    def __init__(
+        self,
+        trello: TrelloClient,
+        obsidian: ObsidianClient,
+        calendar: CalendarClient | None = None,
+    ) -> None:
         self.trello = trello
         self.obsidian = obsidian
+        self.calendar = calendar
         self._labels_cache: list[dict] | None = None
         self._labels_cached_at: datetime | None = None
 
@@ -108,6 +115,8 @@ class ToolExecutor:
                 return results
             case "set_reminder":
                 return self._set_reminder(inp, context)
+            case "create_calendar_event":
+                return await self._create_event(inp)
             case "web_search":
                 return await web_search(inp["query"])
             case "web_fetch":
@@ -173,6 +182,17 @@ class ToolExecutor:
                     break
 
         return result
+
+    async def _create_event(self, inp: dict[str, Any]) -> str:
+        if not self.calendar or not self.calendar.enabled:
+            return "Ошибка: Google Calendar не настроен."
+        start = datetime.fromisoformat(inp["start"])
+        end_str = inp.get("end")
+        end = datetime.fromisoformat(end_str) if end_str else start + timedelta(hours=1)
+        result = await self.calendar.create_event(
+            summary=inp["summary"], start=start, end=end,
+        )
+        return f"Событие создано: {inp['summary']} ({start.strftime('%d.%m %H:%M')}–{end.strftime('%H:%M')})"
 
     async def _get_cards(self, inp: dict[str, Any]) -> list[dict]:
         cards = await self.trello.get_cards(inp["list_name"])

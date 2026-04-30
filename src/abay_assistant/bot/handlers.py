@@ -64,7 +64,7 @@ def setup(
     _llm = llm
     _trello = trello
     _obsidian = obsidian
-    _executor = ToolExecutor(trello=trello, obsidian=obsidian)
+    _executor = ToolExecutor(trello=trello, obsidian=obsidian, calendar=calendar)
     _whisper = whisper
     _calendar = calendar
 

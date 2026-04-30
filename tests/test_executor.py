@@ -145,6 +145,28 @@ async def test_update_card_label_not_found(tool_executor, mock_trello):
     mock_trello.add_label_to_card.assert_not_awaited()
 
 
+async def test_create_calendar_event(mock_trello, obsidian_client):
+    from abay_assistant.tools.executor import ToolExecutor
+    mock_cal = AsyncMock()
+    mock_cal.enabled = True
+    mock_cal.create_event = AsyncMock(return_value={"id": "evt1"})
+    executor = ToolExecutor(trello=mock_trello, obsidian=obsidian_client, calendar=mock_cal)
+    result = await executor.execute(
+        "create_calendar_event",
+        {"summary": "Встреча с Расулом", "start": "2026-05-02T10:00:00"},
+    )
+    mock_cal.create_event.assert_awaited_once()
+    assert "Встреча с Расулом" in result
+
+
+async def test_create_calendar_event_no_calendar(tool_executor):
+    result = await tool_executor.execute(
+        "create_calendar_event",
+        {"summary": "Test", "start": "2026-05-02T10:00:00"},
+    )
+    assert "не настроен" in result
+
+
 async def test_get_cards_includes_desc(tool_executor, mock_trello):
     mock_trello.get_cards = AsyncMock(return_value=[
         {"id": "c1", "name": "Task", "desc": "Some desc", "labels": [], "due": None},
