@@ -658,21 +658,21 @@ def _get_current_week_range() -> tuple[date_type, date_type]:
 
 
 def _format_week_name(monday: date_type, sunday: date_type) -> str:
-    """Сформировать название колонки недели: 'Неделя 5–11 мая'."""
+    """Сформировать название колонки недели: 'неделя 28– 3 мая'."""
     month_genitive = {
         1: "янв.", 2: "фев.", 3: "мар.", 4: "апр.",
         5: "мая", 6: "июня", 7: "июля", 8: "авг.",
         9: "сен.", 10: "окт.", 11: "нояб.", 12: "дек.",
     }
     if monday.month == sunday.month:
-        return f"Неделя {monday.day}–{sunday.day} {month_genitive[monday.month]}"
-    return f"Неделя {monday.day} {month_genitive[monday.month]}–{sunday.day} {month_genitive[sunday.month]}"
+        return f"неделя {monday.day}– {sunday.day} {month_genitive[monday.month]}"
+    return f"неделя {monday.day}– {sunday.day} {month_genitive[sunday.month]}"
 
 
 def _classify_due_date(due_str: str) -> str | None:
     """Определить целевую колонку по дедлайну.
 
-    Возвращает: 'today', 'week', 'month', None (если дальше текущего месяца).
+    Возвращает: 'today', 'week', 'month:N' (N=номер месяца), 'next_year', None.
     """
     try:
         due = datetime.fromisoformat(due_str.replace("Z", "+00:00")).date()
@@ -687,10 +687,15 @@ def _classify_due_date(due_str: str) -> str | None:
     if due <= sunday:
         return "week"
 
-    if due.year == today.year and due.month == today.month:
-        return "month"
+    # В текущем году — колонка месяца
+    if due.year == today.year:
+        return f"month:{due.month}"
 
-    return None  # дальше текущего месяца — не трогаем
+    # Следующий год
+    if due.year > today.year:
+        return "next_year"
+
+    return None
 
 
 def _find_month_list_name(list_names: list[str], target_month: int) -> str | None:
@@ -713,14 +718,13 @@ async def sort_cards_by_due() -> None:
 
     - Просроченные / сегодня → Сегодня
     - На этой неделе → Неделя
-    - В текущем месяце → колонка месяца (Май, Июнь и т.д.)
+    - В этом году → колонка месяца (Май, Июнь и т.д.)
+    - Следующий год → В следующем году
     """
     logger.info("Запуск sort_cards_by_due")
     try:
         lists = await _trello.get_lists()
         list_names = list(lists.keys())
-        today = date_type.today()
-        month_list = _find_month_list_name(list_names, today.month)
 
         # Маппинг list_id → list_name
         id_to_name = {v: k for k, v in lists.items()}
@@ -734,35 +738,45 @@ async def sort_cards_by_due() -> None:
             if not due:
                 continue
 
+            card_list = id_to_name.get(card.get("idList"), "")
+
+            # Не перемещать из "Готово", "Мяч на стороне", "Изучить"
+            skip_lists = ("готово", "мяч на стороне", "изучить")
+            if any(s in card_list.lower() for s in skip_lists):
+                continue
+
             target = _classify_due_date(due)
             if not target:
                 continue
 
-            card_list = id_to_name.get(card.get("idList"), "")
-
             # Определить целевую колонку
+            target_list_name = None
             if target == "today":
-                target_list = TrelloList.TODAY
+                target_list_name = str(TrelloList.TODAY)
             elif target == "week":
-                target_list = TrelloList.WEEK
-            elif target == "month" and month_list:
-                target_list = month_list
-            else:
+                target_list_name = str(TrelloList.WEEK)
+            elif target.startswith("month:"):
+                month_num = int(target.split(":")[1])
+                target_list_name = _find_month_list_name(list_names, month_num)
+            elif target == "next_year":
+                # Найти колонку "В следующем году"
+                for name in list_names:
+                    if "следующ" in name.lower():
+                        target_list_name = name
+                        break
+
+            if not target_list_name:
                 continue
 
             # Не перемещать если уже в правильной колонке
-            target_list_lower = str(target_list).lower()
-            if target_list_lower in card_list.lower():
-                continue
-            # Не перемещать из "Готово", "Мяч на стороне", "Backlog"
-            skip_lists = ("готово", "мяч на стороне", "backlog", "изучить")
-            if any(s in card_list.lower() for s in skip_lists):
+            target_lower = target_list_name.lower()
+            if target_lower in card_list.lower() or card_list.lower() in target_lower:
                 continue
 
             try:
-                await _trello.move_card(card["id"], str(target_list))
+                await _trello.move_card(card["id"], target_list_name)
                 moved += 1
-                logger.info("Sort: '{}' → '{}'", card["name"], target_list)
+                logger.info("Sort: '{}' → '{}'", card["name"], target_list_name)
             except Exception as e:
                 logger.error("Sort move error '{}': {}", card["name"], e)
 

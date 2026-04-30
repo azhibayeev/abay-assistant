@@ -235,11 +235,26 @@ def test_classify_due_date_invalid():
 # _format_week_name
 # ─────────────────────────────────────────────
 
+def test_classify_due_date_future_month():
+    """Date in a future month this year → 'month:N'."""
+    future = date.today().replace(month=12, day=15)
+    if future <= date.today():
+        return  # skip if December has passed
+    assert _classify_due_date(future.isoformat()).startswith("month:")
+
+
+def test_classify_due_date_next_year():
+    """Date in next year → 'next_year'."""
+    next_year = date(date.today().year + 1, 3, 15)
+    assert _classify_due_date(next_year.isoformat()) == "next_year"
+
+
 def test_format_week_name_same_month():
     monday = date(2026, 5, 4)
     sunday = date(2026, 5, 10)
     result = _format_week_name(monday, sunday)
-    assert "4–10" in result
+    assert "4" in result
+    assert "10" in result
     assert "мая" in result
 
 

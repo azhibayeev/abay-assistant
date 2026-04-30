@@ -40,6 +40,7 @@ class TrelloList(StrEnum):
     STUDY = "Изучить"
     BACKLOG = "Backlog"
     DONE = "Готово"
+    NEXT_YEAR = "В следующем году"
 
 
 class UserRole(StrEnum):
