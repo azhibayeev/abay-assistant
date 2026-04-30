@@ -1,6 +1,7 @@
 import asyncio
 import signal
 import sys
+import traceback
 
 from aiogram import Bot, Dispatcher
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -113,6 +114,12 @@ async def main() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _shutdown_signal)
 
+    # Ping owner при старте
+    try:
+        await bot.send_message(s.telegram_owner_id, "Бот запущен.")
+    except Exception:
+        pass
+
     logger.info("Бот запускается (polling)...")
     try:
         await dp.start_polling(bot)
@@ -120,9 +127,31 @@ async def main() -> None:
         pass
     finally:
         scheduler.shutdown(wait=False)
+        try:
+            await bot.send_message(s.telegram_owner_id, "Бот остановлен.")
+        except Exception:
+            pass
         await bot.session.close()
         logger.info("Бот остановлен.")
 
 
+async def _run_with_crash_ping() -> None:
+    """Обёртка: при крэше отправить ping в Telegram."""
+    try:
+        await main()
+    except Exception:
+        error = traceback.format_exc()
+        logger.critical("Бот упал:\n{}", error)
+        try:
+            s = get_settings()
+            bot = Bot(token=s.telegram_bot_token)
+            short = error[-500:] if len(error) > 500 else error
+            await bot.send_message(s.telegram_owner_id, f"Бот упал:\n\n{short}")
+            await bot.session.close()
+        except Exception:
+            pass
+        raise
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(_run_with_crash_ping())
