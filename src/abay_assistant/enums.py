@@ -34,8 +34,8 @@ class FailedAction(StrEnum):
 
 
 class TrelloList(StrEnum):
-    TODAY = "Сегодня"
-    WEEK = "Неделя"
+    TODAY = "сегодня"
+    WEEK = "неделя"  # подстрока — найдёт "неделя 27– 3 май." и т.п.
     WAITING = "Мяч на стороне"
     STUDY = "Изучить"
     BACKLOG = "Backlog"

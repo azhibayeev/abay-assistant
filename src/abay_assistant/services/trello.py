@@ -67,10 +67,14 @@ class TrelloClient:
 
     async def _list_id_by_name(self, list_name: str) -> str:
         await self._ensure_lists_cache()
-        # case-insensitive search
         lower = list_name.lower()
+        # Точное совпадение (case-insensitive)
         for name, lid in self._lists_cache.items():
             if name.lower() == lower:
+                return lid
+        # Поиск по подстроке (для "Неделя" → "неделя 27– 3 май.")
+        for name, lid in self._lists_cache.items():
+            if lower in name.lower():
                 return lid
         raise ValueError(f"Список '{list_name}' не найден на доске")
 
