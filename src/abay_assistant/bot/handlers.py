@@ -13,7 +13,7 @@ from aiogram.types import Message as TgMessage
 from loguru import logger
 
 from abay_assistant.config import get_settings
-from abay_assistant.db import save_message, get_recent_messages, get_active_reminders, delete_reminder, get_tool_stats, get_message_stats
+from abay_assistant.db import save_message, get_recent_messages, get_active_reminders, delete_reminder, get_tool_stats, get_message_stats, save_idea, get_ideas, update_idea_status
 from abay_assistant.enums import UserRole, TrelloList
 from abay_assistant.services.llm import LLMClient
 from abay_assistant.services.trello import TrelloClient
@@ -232,6 +232,8 @@ async def cmd_help(message: TgMessage) -> None:
         "/project — список проектов (inline-кнопки)\n"
         "/project DMS — карточка проекта\n"
         "/health — проверка состояния бота\n"
+        "/idea <текст> — записать идею по улучшению бота\n"
+        "/ideas — список открытых идей\n"
         "/stats — статистика за 7 дней\n"
         "/help — эта справка\n\n"
         "<b>Что умею:</b>\n"
@@ -331,6 +333,57 @@ async def cmd_stats(message: TgMessage) -> None:
         lines.append("Tool calls: нет данных")
 
     await _send_html(message, "\n".join(lines))
+
+
+@router.message(F.text.startswith("/idea"))
+async def cmd_idea(message: TgMessage) -> None:
+    """Записать идею по улучшению бота или посмотреть список."""
+    role = _user_role(message.from_user.id)
+    if role == UserRole.UNKNOWN:
+        await message.answer("Доступ ограничен.")
+        return
+
+    parts = message.text.split(maxsplit=1)
+    command = parts[0].lower()
+
+    # /ideas — список открытых идей
+    if command == "/ideas":
+        ideas = get_ideas(status="open")
+        if not ideas:
+            await message.answer("Открытых идей нет.")
+            return
+        lines = ["<b>Идеи по улучшению бота:</b>\n"]
+        for idea in ideas:
+            date_str = idea.created_at.strftime("%d.%m")
+            lines.append(f"  #{idea.id} ({date_str}) — {idea.text}")
+        lines.append("\nГотово: /idea done <номер>")
+        await _send_html(message, "\n".join(lines))
+        return
+
+    # /idea done 5 — пометить как сделанную
+    if len(parts) > 1 and parts[1].startswith("done"):
+        try:
+            idea_id = int(parts[1].split()[-1])
+            if update_idea_status(idea_id, "done"):
+                await message.answer(f"Идея #{idea_id} помечена как сделанная.")
+            else:
+                await message.answer(f"Идея #{idea_id} не найдена.")
+        except (ValueError, IndexError):
+            await message.answer("Использование: /idea done <номер>")
+        return
+
+    # /idea <текст> — записать новую идею
+    if len(parts) < 2:
+        await message.answer(
+            "Использование:\n"
+            "/idea <текст> — записать идею\n"
+            "/ideas — список идей\n"
+            "/idea done <номер> — пометить как сделанную"
+        )
+        return
+
+    idea = save_idea(message.from_user.id, parts[1])
+    await message.answer(f"Идея #{idea.id} записана: {idea.text}")
 
 
 @router.message(F.text.startswith("/reminders"))

@@ -16,6 +16,9 @@ from abay_assistant.db import (
     log_tool_usage,
     get_tool_stats,
     get_message_stats,
+    save_idea,
+    get_ideas,
+    update_idea_status,
 )
 
 
@@ -187,3 +190,34 @@ def test_get_message_stats_empty(in_memory_db):
     stats = get_message_stats(days=7)
     assert stats["user_messages"] == 0
     assert stats["bot_messages"] == 0
+
+
+# ─────────────────────────────────────────
+# Ideas
+# ─────────────────────────────────────────
+
+def test_save_idea(in_memory_db):
+    idea = save_idea(111, "Добавить голосовые напоминания")
+    assert idea.id is not None
+    assert idea.text == "Добавить голосовые напоминания"
+    assert idea.status == "open"
+
+
+def test_get_ideas(in_memory_db):
+    save_idea(111, "Идея 1")
+    save_idea(111, "Идея 2")
+    ideas = get_ideas(status="open")
+    assert len(ideas) == 2
+
+
+def test_update_idea_status(in_memory_db):
+    idea = save_idea(111, "Тестовая идея")
+    assert update_idea_status(idea.id, "done") is True
+    open_ideas = get_ideas(status="open")
+    assert len(open_ideas) == 0
+    done_ideas = get_ideas(status="done")
+    assert len(done_ideas) == 1
+
+
+def test_update_idea_status_not_found(in_memory_db):
+    assert update_idea_status(999, "done") is False

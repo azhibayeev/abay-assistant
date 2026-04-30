@@ -59,6 +59,14 @@ class ToolUsage(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.now)
 
 
+class Idea(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    telegram_id: int = Field(index=True)
+    text: str
+    status: str = "open"  # "open" | "done" | "rejected"
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
 class WeeklyCache(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     week_start: str  # ISO date string
@@ -250,6 +258,44 @@ def get_message_stats(days: int = 7) -> dict:
         )
         bot_count = session.exec(stmt2).one()
     return {"user_messages": user_count, "bot_messages": bot_count}
+
+
+# ─────────────────────────────────────────
+# Ideas
+# ─────────────────────────────────────────
+
+def save_idea(telegram_id: int, text: str) -> Idea:
+    """Сохранить идею по улучшению бота."""
+    idea = Idea(telegram_id=telegram_id, text=text)
+    with get_session() as session:
+        session.add(idea)
+        session.commit()
+        session.refresh(idea)
+    return idea
+
+
+def get_ideas(status: str = "open") -> list[Idea]:
+    """Получить идеи по статусу."""
+    with get_session() as session:
+        stmt = (
+            select(Idea)
+            .where(Idea.status == status)
+            .order_by(Idea.created_at.desc())
+        )
+        return list(session.exec(stmt).all())
+
+
+def update_idea_status(idea_id: int, status: str) -> bool:
+    """Обновить статус идеи. Возвращает True если обновлено."""
+    with get_session() as session:
+        stmt = select(Idea).where(Idea.id == idea_id)
+        idea = session.exec(stmt).first()
+        if idea:
+            idea.status = status
+            session.add(idea)
+            session.commit()
+            return True
+        return False
 
 
 def get_daily_stats(start_date: str, end_date: str) -> list[DailyStat]:
