@@ -13,7 +13,7 @@ from aiogram.types import Message as TgMessage
 from loguru import logger
 
 from abay_assistant.config import get_settings
-from abay_assistant.db import save_message, get_recent_messages, get_active_reminders, delete_reminder
+from abay_assistant.db import save_message, get_recent_messages, get_active_reminders, delete_reminder, get_tool_stats, get_message_stats
 from abay_assistant.enums import UserRole, TrelloList
 from abay_assistant.services.llm import LLMClient
 from abay_assistant.services.trello import TrelloClient
@@ -209,6 +209,7 @@ async def cmd_help(message: TgMessage) -> None:
         "/project — список проектов (inline-кнопки)\n"
         "/project DMS — карточка проекта\n"
         "/health — проверка состояния бота\n"
+        "/stats — статистика за 7 дней\n"
         "/help — эта справка\n\n"
         "<b>Что умею:</b>\n"
         "— Создавать/перемещать/архивировать задачи в Trello\n"
@@ -283,6 +284,30 @@ async def cmd_health(message: TgMessage) -> None:
     checks.append("✅ Calendar: OK" if calendar_ok else "⚠️ Calendar: не настроен")
 
     await message.answer("<b>Health check:</b>\n" + "\n".join(checks), parse_mode=ParseMode.HTML)
+
+
+@router.message(F.text == "/stats")
+async def cmd_stats(message: TgMessage) -> None:
+    """Статистика использования бота за 7 дней."""
+    role = _user_role(message.from_user.id)
+    if role != UserRole.OWNER:
+        await message.answer("Доступ ограничен.")
+        return
+
+    msg_stats = get_message_stats(days=7)
+    tool_stats = get_tool_stats(days=7)
+
+    lines = ["<b>Статистика за 7 дней:</b>\n"]
+    lines.append(f"Сообщений: {msg_stats['user_messages']} от тебя, {msg_stats['bot_messages']} от бота\n")
+
+    if tool_stats:
+        lines.append("<b>Tool calls:</b>")
+        for ts in tool_stats[:10]:
+            lines.append(f"  {ts['tool_name']}: {ts['count']}")
+    else:
+        lines.append("Tool calls: нет данных")
+
+    await _send_html(message, "\n".join(lines))
 
 
 @router.message(F.text.startswith("/reminders"))

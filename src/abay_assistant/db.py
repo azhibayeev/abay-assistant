@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from sqlmodel import Field, SQLModel, create_engine, select, Session
@@ -49,6 +49,13 @@ class DailyStat(SQLModel, table=True):
     energy: int = 0  # 1-5
     charged_by: str = ""
     drained_by: str = ""
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class ToolUsage(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    telegram_id: int = Field(index=True)
+    tool_name: str = Field(index=True)
     created_at: datetime = Field(default_factory=datetime.now)
 
 
@@ -203,6 +210,46 @@ def save_daily_stat(
         session.commit()
         session.refresh(stat)
         return stat
+
+
+def log_tool_usage(telegram_id: int, tool_name: str) -> None:
+    """Записать вызов tool."""
+    with get_session() as session:
+        session.add(ToolUsage(telegram_id=telegram_id, tool_name=tool_name))
+        session.commit()
+
+
+def get_tool_stats(days: int = 7) -> list[dict]:
+    """Статистика tool calls за N дней. Возвращает [{tool_name, count}] отсортированные."""
+    from sqlalchemy import func
+    cutoff = datetime.now() - timedelta(days=days)
+    with get_session() as session:
+        stmt = (
+            select(ToolUsage.tool_name, func.count().label("cnt"))
+            .where(ToolUsage.created_at >= cutoff)
+            .group_by(ToolUsage.tool_name)
+            .order_by(func.count().desc())
+        )
+        rows = session.exec(stmt).all()
+        return [{"tool_name": r[0], "count": r[1]} for r in rows]
+
+
+def get_message_stats(days: int = 7) -> dict:
+    """Статистика сообщений за N дней."""
+    from sqlalchemy import func
+    cutoff = datetime.now() - timedelta(days=days)
+    with get_session() as session:
+        stmt = (
+            select(func.count())
+            .where(Message.created_at >= cutoff, Message.role == "user")
+        )
+        user_count = session.exec(stmt).one()
+        stmt2 = (
+            select(func.count())
+            .where(Message.created_at >= cutoff, Message.role == "assistant")
+        )
+        bot_count = session.exec(stmt2).one()
+    return {"user_messages": user_count, "bot_messages": bot_count}
 
 
 def get_daily_stats(start_date: str, end_date: str) -> list[DailyStat]:

@@ -9,7 +9,7 @@ from loguru import logger
 from abay_assistant.services.trello import TrelloClient
 from abay_assistant.services.obsidian import ObsidianClient
 from abay_assistant.services.web import web_search, web_fetch
-from abay_assistant.db import create_reminder
+from abay_assistant.db import create_reminder, log_tool_usage
 
 LABELS_CACHE_TTL = timedelta(minutes=5)
 
@@ -41,6 +41,14 @@ class ToolExecutor:
     ) -> str:
         """Выполнить tool call. Возвращает строку результата для tool_result."""
         logger.info("Tool call: {}({})", tool_name, tool_input)
+
+        # Логировать использование tool
+        telegram_id = (context or {}).get("telegram_id")
+        if telegram_id:
+            try:
+                log_tool_usage(telegram_id, tool_name)
+            except Exception:
+                pass  # не блокировать tool call из-за метрики
 
         try:
             result = await self._dispatch(tool_name, tool_input, context)

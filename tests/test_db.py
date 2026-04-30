@@ -13,6 +13,9 @@ from abay_assistant.db import (
     delete_reminder,
     save_daily_stat,
     get_daily_stats,
+    log_tool_usage,
+    get_tool_stats,
+    get_message_stats,
 )
 
 
@@ -140,3 +143,47 @@ def test_get_daily_stats_range(in_memory_db):
     assert stats[2].date == "2026-04-30"
     total_done = sum(s.done_count for s in stats)
     assert total_done == 9
+
+
+# ─────────────────────────────────────────
+# Tool Usage & Metrics
+# ─────────────────────────────────────────
+
+def test_log_tool_usage(in_memory_db):
+    log_tool_usage(111, "create_trello_card")
+    log_tool_usage(111, "web_search")
+    stats = get_tool_stats(days=7)
+    assert len(stats) == 2
+
+
+def test_get_tool_stats_sorted(in_memory_db):
+    for _ in range(3):
+        log_tool_usage(111, "web_search")
+    log_tool_usage(111, "create_trello_card")
+
+    stats = get_tool_stats(days=7)
+    assert stats[0]["tool_name"] == "web_search"
+    assert stats[0]["count"] == 3
+    assert stats[1]["tool_name"] == "create_trello_card"
+    assert stats[1]["count"] == 1
+
+
+def test_get_tool_stats_empty(in_memory_db):
+    stats = get_tool_stats(days=7)
+    assert stats == []
+
+
+def test_get_message_stats(in_memory_db):
+    save_message(111, "user", "Привет")
+    save_message(111, "assistant", "Ответ")
+    save_message(111, "user", "Ещё")
+
+    stats = get_message_stats(days=7)
+    assert stats["user_messages"] == 2
+    assert stats["bot_messages"] == 1
+
+
+def test_get_message_stats_empty(in_memory_db):
+    stats = get_message_stats(days=7)
+    assert stats["user_messages"] == 0
+    assert stats["bot_messages"] == 0
