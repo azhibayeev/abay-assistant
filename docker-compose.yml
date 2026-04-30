@@ -1,0 +1,11 @@
+services:
+  app:
+    build: .
+    env_file: .env
+    volumes:
+      - db-data:/app/data
+      - ./abay-vault:/app/abay-vault
+    restart: unless-stopped
+
+volumes:
+  db-data:
