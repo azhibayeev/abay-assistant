@@ -94,7 +94,7 @@ class TrelloClient:
         list_id = await self._list_id_by_name(list_name)
         cards = await self._request(
             "GET", f"/lists/{list_id}/cards",
-            params={"fields": "name,desc,labels,due,idChecklists,shortUrl,dateLastActivity"},
+            params={"fields": "name,desc,labels,due,shortUrl,dateLastActivity"},
         )
         logger.debug("Trello get_cards('{}'): {} шт.", list_name, len(cards))
         return cards
@@ -173,6 +173,23 @@ class TrelloClient:
         )
         logger.info("Trello добавлен пункт '{}' в карточку {}", text, card_id)
         return item
+
+    async def add_comment(self, card_id: str, text: str) -> dict:
+        """Добавить комментарий к карточке."""
+        comment = await self._request(
+            "POST", f"/cards/{card_id}/actions/comments",
+            params={"text": text},
+        )
+        logger.info("Trello добавлен комментарий к карточке {}", card_id)
+        return comment
+
+    async def add_label_to_card(self, card_id: str, label_id: str) -> None:
+        """Добавить метку к карточке (не убирая существующие)."""
+        await self._request(
+            "POST", f"/cards/{card_id}/idLabels",
+            params={"value": label_id},
+        )
+        logger.info("Trello метка {} добавлена к карточке {}", label_id, card_id)
 
     async def get_labels(self) -> list[dict]:
         """Получить метки доски."""

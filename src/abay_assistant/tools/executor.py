@@ -67,6 +67,8 @@ class ToolExecutor:
                 return await self._update_card(inp)
             case "move_trello_card":
                 return await self.trello.move_card(inp["card_id"], inp["target_list"])
+            case "add_trello_comment":
+                return await self.trello.add_comment(inp["card_id"], inp["text"])
             case "add_checklist_item":
                 return await self.trello.add_checklist_item(inp["card_id"], inp["text"])
             case "get_trello_cards":
@@ -157,15 +159,29 @@ class ToolExecutor:
             fields["desc"] = inp["desc"]
         if "due" in inp:
             fields["due"] = inp["due"]
-        return await self.trello.update_card(inp["card_id"], **fields)
+        result = await self.trello.update_card(inp["card_id"], **fields)
+
+        # Добавить метку если указана
+        if label_name := inp.get("label"):
+            all_labels = await self._get_labels_cached()
+            for lb in all_labels:
+                if lb["name"].lower() == label_name.lower():
+                    try:
+                        await self.trello.add_label_to_card(inp["card_id"], lb["id"])
+                    except Exception:
+                        pass  # метка уже стоит — Trello вернёт ошибку
+                    break
+
+        return result
 
     async def _get_cards(self, inp: dict[str, Any]) -> list[dict]:
         cards = await self.trello.get_cards(inp["list_name"])
-        # Вернуть упрощённый вид для LLM
+        # Вернуть упрощённый вид для LLM (с desc для контекста)
         return [
             {
                 "id": c["id"],
                 "name": c["name"],
+                "desc": c.get("desc", "")[:200],  # обрезать длинные desc
                 "labels": [lb["name"] for lb in c.get("labels", [])],
                 "due": c.get("due"),
             }

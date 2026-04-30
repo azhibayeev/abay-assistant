@@ -43,7 +43,7 @@ _calendar: CalendarClient | None = None
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "inbox.md"
 
-MAX_TOOL_ROUNDS = 3
+MAX_TOOL_ROUNDS = 8
 MAX_VOICE_SIZE = 20 * 1024 * 1024  # 20 MB
 
 # CRM-кеш имён для авто-линковки

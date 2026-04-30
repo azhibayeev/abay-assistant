@@ -51,14 +51,40 @@ TOOLS: list[dict] = [
                 },
                 "desc": {
                     "type": "string",
-                    "description": "Новое описание",
+                    "description": "Новое описание (полностью заменяет старое)",
                 },
                 "due": {
                     "type": "string",
                     "description": "Новый дедлайн (ISO 8601)",
                 },
+                "label": {
+                    "type": "string",
+                    "description": "Добавить метку по имени (не убирает существующие): Стратегия, B2B / B2G, Команда, Финансы, Продукт, Личное, Срочно, Денежная",
+                },
             },
             "required": ["card_id"],
+        },
+    },
+    {
+        "name": "add_trello_comment",
+        "description": (
+            "Добавить комментарий к карточке Trello. "
+            "Используй для статус-апдейтов: итоги встреч, решения, заметки по прогрессу. "
+            "Комментарии сохраняют историю (в отличие от desc)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "card_id": {
+                    "type": "string",
+                    "description": "ID карточки",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Текст комментария (статус, итог, решение)",
+                },
+            },
+            "required": ["card_id", "text"],
         },
     },
     {

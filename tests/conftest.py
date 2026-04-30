@@ -54,9 +54,13 @@ def mock_trello():
     trello.move_card = AsyncMock(return_value={"id": "card123"})
     trello.archive_card = AsyncMock(return_value={"id": "card123"})
     trello.add_checklist_item = AsyncMock(return_value={"id": "item1"})
+    trello.add_comment = AsyncMock(return_value={"id": "comment1"})
+    trello.add_label_to_card = AsyncMock(return_value=None)
     trello.get_labels = AsyncMock(return_value=[
         {"id": "lbl1", "name": "Стратегия"},
         {"id": "lbl2", "name": "Продукт"},
+        {"id": "lbl3", "name": "Срочно"},
+        {"id": "lbl4", "name": "Денежная"},
     ])
     return trello
 

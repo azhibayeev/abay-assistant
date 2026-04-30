@@ -72,11 +72,12 @@ class LLMClient:
         messages: list[dict],
         tools: list[dict],
         system: str = "",
+        max_tokens: int | None = None,
     ) -> anthropic.types.Message:
         """Вызов Claude с tool use. Возвращает полный Message объект."""
         kwargs: dict[str, Any] = {
             "model": MODEL,
-            "max_tokens": MAX_TOKENS,
+            "max_tokens": max_tokens or 4096,
             "messages": messages,
             "tools": tools,
         }

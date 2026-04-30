@@ -117,3 +117,38 @@ async def test_request_clarification(tool_executor):
         {"question": "Что именно имеется в виду?"},
     )
     assert result == "Что именно имеется в виду?"
+
+
+async def test_add_trello_comment(tool_executor, mock_trello):
+    result = await tool_executor.execute(
+        "add_trello_comment",
+        {"card_id": "abc123", "text": "Встреча прошла, мяч на стороне Биби"},
+    )
+    mock_trello.add_comment.assert_awaited_once_with("abc123", "Встреча прошла, мяч на стороне Биби")
+
+
+async def test_update_card_with_label(tool_executor, mock_trello):
+    result = await tool_executor.execute(
+        "update_trello_card",
+        {"card_id": "abc123", "desc": "Описание", "label": "Срочно"},
+    )
+    mock_trello.update_card.assert_awaited_once_with("abc123", desc="Описание")
+    mock_trello.add_label_to_card.assert_awaited_once_with("abc123", "lbl3")
+
+
+async def test_update_card_label_not_found(tool_executor, mock_trello):
+    """Если метка не найдена — не падает."""
+    result = await tool_executor.execute(
+        "update_trello_card",
+        {"card_id": "abc123", "label": "Несуществующая"},
+    )
+    mock_trello.add_label_to_card.assert_not_awaited()
+
+
+async def test_get_cards_includes_desc(tool_executor, mock_trello):
+    mock_trello.get_cards = AsyncMock(return_value=[
+        {"id": "c1", "name": "Task", "desc": "Some desc", "labels": [], "due": None},
+    ])
+    result = await tool_executor.execute("get_trello_cards", {"list_name": "Сегодня"})
+    parsed = json.loads(result)
+    assert parsed[0]["desc"] == "Some desc"
