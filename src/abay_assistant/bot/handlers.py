@@ -252,6 +252,7 @@ async def cmd_help(message: TgMessage) -> None:
     text = (
         "<b>Команды:</b>\n\n"
         "/start — начать работу с ботом\n"
+        "/board — обзор доски (все колонки)\n"
         "/evening — запустить вечерний свод\n"
         "/cancel — отменить вечерний свод / ввод заметки\n"
         "/reminders — список активных напоминаний\n"
@@ -270,8 +271,9 @@ async def cmd_help(message: TgMessage) -> None:
         "— Распознавать голосовые сообщения\n"
         "— Напоминания (\"напомни через 2 часа...\")\n"
         "— Поиск в интернете (\"найди контакты компании...\")\n"
-        "— Утренняя сводка (9:00), чек-ин (14:00), вечерний свод (22:30)\n"
-        "— Weekly-отчёт (воскресенье 21:00)\n\n"
+        "— Утренняя сводка (9:00), nudge (12/16), вечерний свод (22:30)\n"
+        "— Weekly-отчёт (воскресенье 21:00)\n"
+        "— Реплай на nudge = комментарий к карточке\n\n"
         "Просто пиши или отправляй голосовое — разберусь."
     )
     await message.answer(text, parse_mode=ParseMode.HTML)
@@ -487,6 +489,75 @@ async def _send_html(message: TgMessage, text: str) -> None:
         await message.answer(clean)
 
 
+_BOARD_COVER_EMOJI = {"red": "🔴", "orange": "🟠", "green": "🟢", "blue": "🔵"}
+
+
+@router.message(F.text == "/board")
+async def cmd_board(message: TgMessage) -> None:
+    """Мгновенный обзор доски без LLM."""
+    role = await _check_access(message)
+    if not role:
+        return
+
+    try:
+        lists = await _trello.get_lists()
+        all_cards = await _trello.get_all_cards()
+
+        # Группировать карточки по list_id
+        id_to_name = {v: k for k, v in lists.items()}
+        cards_by_list: dict[str, list[dict]] = {}
+        for c in all_cards:
+            list_name = id_to_name.get(c.get("idList"), "")
+            if list_name:
+                cards_by_list.setdefault(list_name, []).append(c)
+
+        # Порядок колонок
+        priority_order = ["сегодня", "неделя", "мяч на стороне"]
+        skip_lists = ["готово"]
+
+        def sort_key(name: str) -> int:
+            lower = name.lower()
+            for i, prefix in enumerate(priority_order):
+                if prefix in lower:
+                    return i
+            if lower in skip_lists:
+                return 100
+            return 10
+
+        sorted_lists = sorted(lists.keys(), key=sort_key)
+
+        lines = ["<b>📋 Доска</b>\n"]
+        for list_name in sorted_lists:
+            if any(s in list_name.lower() for s in skip_lists):
+                continue
+            cards = cards_by_list.get(list_name, [])
+            if not cards:
+                lines.append(f"<b>{list_name}</b> (0)")
+                continue
+
+            lines.append(f"\n<b>{list_name}</b> ({len(cards)})")
+            for c in cards[:5]:
+                cover_color = (c.get("cover") or {}).get("color")
+                emoji = _BOARD_COVER_EMOJI.get(cover_color, "⬜")
+                due = c.get("due", "")
+                due_str = ""
+                if due:
+                    due_date = due[:10]
+                    today_str = datetime.now().strftime("%Y-%m-%d")
+                    if due_date < today_str:
+                        due_str = " ⚠️"
+                    elif due_date == today_str:
+                        due_str = " 🔥"
+                lines.append(f"  {emoji} {c['name']}{due_str}")
+            if len(cards) > 5:
+                lines.append(f"  <i>... +{len(cards) - 5}</i>")
+
+        await _send_html(message, "\n".join(lines))
+    except Exception as e:
+        logger.error("Ошибка /board: {}", e)
+        await message.answer("Ошибка загрузки доски.")
+
+
 @router.message(F.text == "/evening")
 async def cmd_evening(message: TgMessage) -> None:
     """Запустить вечерний свод вручную."""
@@ -539,6 +610,22 @@ async def handle_voice(message: TgMessage, bot: Bot) -> None:
     await _process_inbox(message, role, text)
 
 
+def _extract_card_id_from_reply(message: TgMessage) -> str | None:
+    """Извлечь card_id из inline-кнопок сообщения, на которое ответили."""
+    reply = message.reply_to_message
+    if not reply or not reply.reply_markup:
+        return None
+    for row in reply.reply_markup.inline_keyboard:
+        for btn in row:
+            data = btn.callback_data or ""
+            if data.startswith(("nudge_", "stuck_", "wait_")):
+                # callback_data: {prefix}_{action}_{card_id}
+                parts = data.split("_", 2)
+                if len(parts) >= 3:
+                    return parts[2]
+    return None
+
+
 @router.message(F.text)
 async def handle_text(message: TgMessage) -> None:
     role = await _check_access(message)
@@ -546,6 +633,20 @@ async def handle_text(message: TgMessage) -> None:
         return
 
     tid = message.from_user.id
+
+    # Реплай на nudge/stuck/waiting → комментарий к карточке
+    card_id = _extract_card_id_from_reply(message)
+    if card_id:
+        try:
+            now = datetime.now().strftime("%d.%m.%Y %H:%M")
+            await _trello.add_comment(card_id, f"💬 {now}\n{message.text}")
+            card = await _trello.get_card(card_id)
+            card_name = card.get("name", "?")
+            await message.answer(f"Записал комментарий к «{card_name}».")
+        except Exception as e:
+            logger.error("Ошибка комментария к {}: {}", card_id, e)
+            await message.answer("Не удалось записать комментарий.")
+        return
 
     # Если ожидается заметка CRM — сохранить
     if has_pending_note(tid):
