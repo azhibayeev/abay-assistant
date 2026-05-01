@@ -99,6 +99,13 @@ class TrelloClient:
         logger.debug("Trello get_cards('{}'): {} шт.", list_name, len(cards))
         return cards
 
+    async def get_card(self, card_id: str) -> dict:
+        """Получить одну карточку по ID."""
+        return await self._request(
+            "GET", f"/cards/{card_id}",
+            params={"fields": "name,desc,labels,due,idList"},
+        )
+
     async def get_all_cards(self) -> list[dict]:
         """Все карточки доски."""
         cards = await self._request(

@@ -43,8 +43,8 @@ TOOLS: list[dict] = [
     {
         "name": "update_trello_card",
         "description": (
-            "Обновить существующую карточку в Trello. "
-            "ВАЖНО: не переименовывай карточки — меняй только desc, due, labels."
+            "Обновить существующую карточку в Trello (desc, due, labels). "
+            "Для переименования используй rename_trello_card."
         ),
         "input_schema": {
             "type": "object",
@@ -89,6 +89,29 @@ TOOLS: list[dict] = [
                 },
             },
             "required": ["card_id", "text"],
+        },
+    },
+    {
+        "name": "rename_trello_card",
+        "description": (
+            "Переименовать карточку в Trello. "
+            "Автоматически сохраняет старое название в комментарии (история). "
+            "Используй при перемещении в 'Мяч на стороне' — добавь ответственного через тире: "
+            "'Встреча с Апайкой — Биби'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "card_id": {
+                    "type": "string",
+                    "description": "ID карточки",
+                },
+                "new_name": {
+                    "type": "string",
+                    "description": "Новое название карточки",
+                },
+            },
+            "required": ["card_id", "new_name"],
         },
     },
     {

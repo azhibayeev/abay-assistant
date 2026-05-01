@@ -72,6 +72,8 @@ class ToolExecutor:
                 return await self._create_card(inp)
             case "update_trello_card":
                 return await self._update_card(inp)
+            case "rename_trello_card":
+                return await self._rename_card(inp)
             case "move_trello_card":
                 return await self.trello.move_card(inp["card_id"], inp["target_list"])
             case "add_trello_comment":
@@ -143,6 +145,23 @@ class ToolExecutor:
         )
         time_str = remind_at.strftime("%d.%m.%Y %H:%M")
         return f"Напоминание установлено на {time_str}: {reminder.text}"
+
+    async def _rename_card(self, inp: dict[str, Any]) -> dict:
+        """Переименовать карточку с сохранением истории в комментарии."""
+        card_id = inp["card_id"]
+        new_name = inp["new_name"]
+        # Получить старое название
+        old_card = await self.trello.get_card(card_id)
+        old_name = old_card.get("name", "?")
+        if old_name == new_name:
+            return {"status": "unchanged", "name": new_name}
+        # Записать историю в комментарий
+        await self.trello.add_comment(
+            card_id, f"📝 Переименовано: «{old_name}» → «{new_name}»"
+        )
+        # Переименовать
+        result = await self.trello.update_card(card_id, name=new_name)
+        return result
 
     async def _create_card(self, inp: dict[str, Any]) -> dict:
         # Найти label ID по имени если указан (кешированный запрос)
