@@ -134,6 +134,132 @@ async def cleanup_sessions() -> None:
 
 
 # ─────────────────────────────────────────────
+# 8:50 — Автоматическая чистка доски
+# ─────────────────────────────────────────────
+
+def _normalize_name(name: str) -> str:
+    """Нормализовать название карточки для поиска дублей."""
+    # Убрать ответственного после тире
+    name = re.split(r"\s*[—–-]\s*(?=[А-ЯA-Z])", name)[0]
+    # Привести к нижнему регистру, убрать лишние пробелы
+    return re.sub(r"\s+", " ", name.lower().strip())
+
+
+def _find_duplicates(cards: list[dict]) -> list[tuple[dict, dict]]:
+    """Найти дубли: карточки с одинаковым нормализованным названием."""
+    by_name: dict[str, list[dict]] = defaultdict(list)
+    for c in cards:
+        key = _normalize_name(c["name"])
+        if len(key) >= 5:  # игнорировать слишком короткие
+            by_name[key].append(c)
+
+    duplicates = []
+    for key, group in by_name.items():
+        if len(group) < 2:
+            continue
+        # Оставить карточку с desc или комментариями, архивировать остальные
+        group.sort(key=lambda c: len(c.get("desc", "")), reverse=True)
+        keeper = group[0]
+        for dupe in group[1:]:
+            duplicates.append((keeper, dupe))
+
+    return duplicates
+
+
+def _guess_cover_color(card: dict) -> str | None:
+    """Определить цвет обложки по контексту карточки."""
+    name = card.get("name", "").lower()
+    labels = [lb.get("name", "").lower() for lb in card.get("labels", [])]
+    due = card.get("due", "")
+
+    # Красный: срочно, денежная, контракт, оплата
+    if "срочно" in " ".join(labels):
+        return "red"
+    if any(w in name for w in ("договор", "контракт", "оплат", "счёт", "💰")):
+        return "red"
+    if "денежная" in " ".join(labels):
+        return "red"
+
+    # Просроченный дедлайн → красный
+    if due:
+        try:
+            due_date = datetime.fromisoformat(due.replace("Z", "+00:00")).date()
+            if due_date <= date_type.today():
+                return "red"
+        except (ValueError, TypeError):
+            pass
+
+    # Зелёный: цикличная
+    if any(w in name for w in ("еженедел", "ежедневн", "каждый", "каждую", "регулярн")):
+        return "green"
+
+    # Синий: изучить, стратегия
+    if any(w in name for w in ("изучить", "исследов", "стратег", "разобрать")):
+        return "blue"
+
+    # По умолчанию: оранжевый (важно, но не срочно)
+    return "orange"
+
+
+async def board_cleanup() -> None:
+    """Автоматическая чистка доски: дубли + обложки."""
+    logger.info("Запуск board_cleanup")
+    try:
+        all_cards = await _trello.get_all_cards()
+        actions = []
+
+        # 1. Убрать дубли
+        duplicates = _find_duplicates(all_cards)
+        for keeper, dupe in duplicates:
+            try:
+                # Перенести инфо из дубля в основную
+                dupe_desc = dupe.get("desc", "")
+                if dupe_desc and not keeper.get("desc"):
+                    await _trello.update_card(keeper["id"], desc=dupe_desc)
+                await _trello.add_comment(
+                    keeper["id"],
+                    f"🔄 Дубль «{dupe['name']}» объединён и архивирован.",
+                )
+                await _trello.archive_card(dupe["id"])
+                actions.append(f"Дубль: «{dupe['name']}» → архив (оставил «{keeper['name']}»)")
+                logger.info("Дубль архивирован: '{}' (оставил '{}')", dupe["name"], keeper["name"])
+            except Exception as e:
+                logger.error("Ошибка при чистке дубля '{}': {}", dupe["name"], e)
+
+        # 2. Назначить обложки карточкам без цвета
+        for card in all_cards:
+            cover = (card.get("cover") or {}).get("color")
+            if cover:
+                continue
+            # Пропустить готовые и архивные
+            if card.get("closed"):
+                continue
+
+            color = _guess_cover_color(card)
+            if color:
+                try:
+                    await _trello.set_cover(card["id"], color)
+                    actions.append(f"Обложка: «{card['name']}» → {_COVER_EMOJI.get(color, color)}")
+                    logger.info("Обложка назначена: '{}' → {}", card["name"], color)
+                except Exception as e:
+                    logger.error("Ошибка назначения обложки '{}': {}", card["name"], e)
+
+        if actions:
+            chat_id = _target_chat()
+            summary = "🧹 <b>Автоматическая чистка доски:</b>\n" + "\n".join(f"• {a}" for a in actions)
+            try:
+                await _bot.send_message(chat_id, summary, parse_mode=ParseMode.HTML)
+            except Exception:
+                await _bot.send_message(chat_id, summary.replace("<b>", "").replace("</b>", ""))
+            logger.info("board_cleanup: {} действий", len(actions))
+        else:
+            logger.info("board_cleanup: доска чистая")
+
+    except Exception as e:
+        logger.error("Ошибка board_cleanup: {}", e)
+
+
+# ─────────────────────────────────────────────
 # 9:00 — Утренняя сводка
 # ─────────────────────────────────────────────
 
