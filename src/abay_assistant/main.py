@@ -4,6 +4,7 @@ import sys
 import traceback
 
 from aiogram import Bot, Dispatcher
+from aiogram.types import BotCommand
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
 
@@ -128,6 +129,20 @@ async def main() -> None:
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _shutdown_signal)
+
+    # Установить меню команд (перезаписывает старые)
+    await bot.set_my_commands([
+        BotCommand(command="board", description="Обзор доски Trello"),
+        BotCommand(command="reminders", description="Активные напоминания"),
+        BotCommand(command="evening", description="Вечерний свод"),
+        BotCommand(command="stats", description="Статистика за 7 дней"),
+        BotCommand(command="who", description="Найти человека в CRM"),
+        BotCommand(command="project", description="Найти проект в CRM"),
+        BotCommand(command="idea", description="Записать идею по боту"),
+        BotCommand(command="health", description="Проверка сервисов"),
+        BotCommand(command="cancel", description="Отменить текущее действие"),
+        BotCommand(command="help", description="Справка"),
+    ])
 
     # Ping owner при старте
     try:
