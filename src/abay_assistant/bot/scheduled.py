@@ -7,6 +7,7 @@ import re
 from collections import defaultdict
 from datetime import date as date_type, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Router
 from aiogram.enums import ParseMode
@@ -678,10 +679,11 @@ async def _get_crm_followups(days_threshold: int = 14) -> list[dict]:
 # ─────────────────────────────────────────────
 
 async def meeting_prep() -> None:
-    """Проверить календарь: если через ~30 минут встреча с человеком из CRM — отправить контекст."""
+    """Проверить календарь: если через ~30 минут встреча — отправить напоминание + CRM-контекст."""
     try:
         chat_id = _target_chat()
-        now = datetime.now()
+        tz = ZoneInfo(get_settings().timezone)
+        now = datetime.now(tz)
 
         events = await _calendar.get_events(date=now)
         if not events:
@@ -695,19 +697,23 @@ async def meeting_prep() -> None:
 
             try:
                 event_start = datetime.fromisoformat(start_str)
-                event_start_naive = event_start.replace(tzinfo=None)
+                # Привести к таймзоне Алматы если нет tzinfo
+                if event_start.tzinfo is None:
+                    event_start = event_start.replace(tzinfo=tz)
+                else:
+                    event_start = event_start.astimezone(tz)
             except (ValueError, TypeError):
                 continue
 
             # Окно: через 25-35 минут
-            if not (now + timedelta(minutes=25) <= event_start_naive <= now + timedelta(minutes=35)):
+            if not (now + timedelta(minutes=25) <= event_start <= now + timedelta(minutes=35)):
                 continue
 
             dedup_key = f"{start_str}|{summary}"
             if dedup_key in _notified_meetings:
                 continue
 
-            time_str = event_start_naive.strftime("%H:%M")
+            time_str = event_start.strftime("%H:%M")
             msg = f"⏰ Через ~30 мин ({time_str}): {summary}"
 
             matched_name = _match_event_to_crm(summary, people)
@@ -719,9 +725,9 @@ async def meeting_prep() -> None:
             _notified_meetings.add(dedup_key)
             logger.info("Meeting reminder: {} (CRM: {})", summary, matched_name or "—")
 
-        # Очистить старые ключи (оставить только сегодняшние)
-        today_prefix = now.strftime("%Y-%m-%d")
-        stale_keys = {k for k in _notified_meetings if not k.startswith(today_prefix)}
+        # Очистить старые ключи
+        today_str = now.strftime("%Y-%m-%d")
+        stale_keys = {k for k in _notified_meetings if not k.startswith(today_str)}
         _notified_meetings.difference_update(stale_keys)
 
     except Exception as e:
