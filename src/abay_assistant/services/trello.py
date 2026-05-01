@@ -94,7 +94,7 @@ class TrelloClient:
         list_id = await self._list_id_by_name(list_name)
         cards = await self._request(
             "GET", f"/lists/{list_id}/cards",
-            params={"fields": "name,desc,labels,due,shortUrl,dateLastActivity"},
+            params={"fields": "name,desc,labels,due,cover,shortUrl,dateLastActivity"},
         )
         logger.debug("Trello get_cards('{}'): {} шт.", list_name, len(cards))
         return cards
@@ -110,7 +110,7 @@ class TrelloClient:
         """Все карточки доски."""
         cards = await self._request(
             "GET", f"/boards/{self._board_id}/cards",
-            params={"fields": "name,desc,labels,due,idList,shortUrl"},
+            params={"fields": "name,desc,labels,due,cover,idList,shortUrl"},
         )
         logger.debug("Trello get_all_cards: {} шт.", len(cards))
         return cards
@@ -210,6 +210,18 @@ class TrelloClient:
             self._lists_cache[new_name] = lid
         logger.info("Trello список '{}' переименован в '{}'", list_name, new_name)
         return result
+
+    async def set_cover(self, card_id: str, color: str) -> dict:
+        """Установить цвет обложки карточки.
+
+        Цвета: red, orange, green, blue, yellow, purple, pink, sky, lime, black.
+        """
+        card = await self._request(
+            "PUT", f"/cards/{card_id}",
+            params={"cover[color]": color, "cover[size]": "full"},
+        )
+        logger.info("Trello обложка {} → {}", card_id, color)
+        return card
 
     async def get_labels(self) -> list[dict]:
         """Получить метки доски."""

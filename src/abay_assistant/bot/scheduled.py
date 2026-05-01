@@ -175,12 +175,30 @@ async def morning_briefing() -> None:
         logger.error("Ошибка утренней сводки: {}", e)
 
 
+_COVER_EMOJI = {
+    "red": "🔴",
+    "orange": "🟠",
+    "green": "🟢",
+    "blue": "🔵",
+}
+
+
+def _cover_emoji(card: dict) -> str:
+    """Вернуть эмодзи цвета обложки карточки."""
+    color = (card.get("cover") or {}).get("color")
+    return _COVER_EMOJI.get(color, "⬜")
+
+
 async def _get_today_cards() -> list[dict]:
     """Карточки из списка 'Сегодня'."""
     try:
         cards = await _trello.get_cards(TrelloList.TODAY)
         return [
-            {"name": c["name"], "labels": [lb["name"] for lb in c.get("labels", [])]}
+            {
+                "name": c["name"],
+                "labels": [lb["name"] for lb in c.get("labels", [])],
+                "cover": _cover_emoji(c),
+            }
             for c in cards
         ]
     except Exception as e:
@@ -242,7 +260,7 @@ async def noon_checkin() -> None:
         if count == 0:
             text = "Полдня позади. Список «Сегодня» пуст — добавь задачи или отдыхай."
         else:
-            names = "\n".join(f"  — {c['name']}" for c in today_cards[:7])
+            names = "\n".join(f"  {c.get('cover', '⬜')} {c['name']}" for c in today_cards[:7])
             text = (
                 f"Полдня позади. В «Сегодня» осталось <b>{count}</b> задач:\n"
                 f"{names}\n\n"
@@ -656,10 +674,11 @@ async def card_nudge() -> None:
 
         for c in cards:
             due = c.get("due", "")
+            emoji = _cover_emoji(c)
             if due and due[:10] <= today_str:
-                urgent.append(c["name"])
+                urgent.append(f"{emoji} {c['name']}")
             else:
-                rest.append(c["name"])
+                rest.append(f"{emoji} {c['name']}")
 
         # Показать до 3 срочных, если мало — добрать из остальных
         nudge_cards = urgent[:3]

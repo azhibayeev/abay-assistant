@@ -133,6 +133,30 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "set_trello_card_cover",
+        "description": (
+            "Установить цвет обложки карточки Trello (приоритет/тип). "
+            "Цвета: red (🔴 критично), orange (🟠 важно, не срочно), "
+            "green (🟢 цикличная), blue (🔵 важно, но можно потом). "
+            "Спрашивай цвет при создании карточки и когда видишь карточку без обложки."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "card_id": {
+                    "type": "string",
+                    "description": "ID карточки",
+                },
+                "color": {
+                    "type": "string",
+                    "enum": ["red", "orange", "green", "blue"],
+                    "description": "Цвет обложки: red (критично), orange (важно не срочно), green (цикличная), blue (важно можно потом)",
+                },
+            },
+            "required": ["card_id", "color"],
+        },
+    },
+    {
         "name": "add_checklist_item",
         "description": (
             "Добавить пункт в чек-лист карточки. "

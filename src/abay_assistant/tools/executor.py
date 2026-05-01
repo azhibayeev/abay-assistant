@@ -78,6 +78,8 @@ class ToolExecutor:
                 return await self.trello.move_card(inp["card_id"], inp["target_list"])
             case "add_trello_comment":
                 return await self.trello.add_comment(inp["card_id"], inp["text"])
+            case "set_trello_card_cover":
+                return await self.trello.set_cover(inp["card_id"], inp["color"])
             case "add_checklist_item":
                 return await self.trello.add_checklist_item(inp["card_id"], inp["text"])
             case "get_trello_cards":
@@ -223,6 +225,7 @@ class ToolExecutor:
                 "desc": c.get("desc", "")[:200],  # обрезать длинные desc
                 "labels": [lb["name"] for lb in c.get("labels", [])],
                 "due": c.get("due"),
+                "cover_color": (c.get("cover") or {}).get("color"),
             }
             for c in cards
         ]
