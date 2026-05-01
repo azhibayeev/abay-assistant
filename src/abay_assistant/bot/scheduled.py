@@ -715,10 +715,35 @@ async def card_nudge() -> None:
             f"{greeting} Пройдёмся по задачам ({len(cards)} в «Сегодня»):",
         )
 
-        # Отправить каждую карточку с кнопками
+        # Отправить каждую карточку с кнопками и контекстом
         for c in nudge_cards:
             emoji = _cover_emoji(c)
             card_id = c["id"]
+
+            # Собрать контекст: дедлайн, дни без активности
+            details = []
+            due = c.get("due", "")
+            if due:
+                due_date = due[:10]
+                if due_date < today_str:
+                    details.append(f"⚠️ просрочено ({due_date})")
+                elif due_date == today_str:
+                    details.append(f"срок сегодня")
+                else:
+                    details.append(f"срок {due_date}")
+
+            dla = c.get("dateLastActivity", "")
+            if dla:
+                try:
+                    activity = datetime.fromisoformat(dla.replace("Z", "+00:00")).replace(tzinfo=None)
+                    days_inactive = (now - activity).days
+                    if days_inactive >= 3:
+                        details.append(f"{days_inactive} дн. без движения")
+                except (ValueError, TypeError):
+                    pass
+
+            detail_str = f" — {', '.join(details)}" if details else ""
+
             kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="✅ Сделано", callback_data=f"nudge_done_{card_id}"),
                 InlineKeyboardButton(text="🔄 В процессе", callback_data=f"nudge_wip_{card_id}"),
@@ -726,7 +751,7 @@ async def card_nudge() -> None:
             ]])
             await _bot.send_message(
                 chat_id,
-                f"{emoji} <b>{c['name']}</b>",
+                f"{emoji} <b>{c['name']}</b>{detail_str}",
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb,
             )
