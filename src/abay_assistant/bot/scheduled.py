@@ -8,8 +8,9 @@ from collections import defaultdict
 from datetime import date as date_type, datetime, timedelta
 from pathlib import Path
 
-from aiogram import Bot
+from aiogram import Bot, Router
 from aiogram.enums import ParseMode
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from loguru import logger
 
 from abay_assistant.config import get_settings
@@ -32,6 +33,9 @@ _obsidian: ObsidianClient | None = None
 
 # Дедупликация уведомлений о встречах (in-memory, сбрасывается при рестарте)
 _notified_meetings: set[str] = set()
+
+# Роутер для nudge callback-ов
+nudge_router = Router()
 
 
 def setup(
@@ -658,7 +662,7 @@ async def stuck_tasks() -> None:
 # ─────────────────────────────────────────────
 
 async def card_nudge() -> None:
-    """Выбрать 2-3 карточки из «Сегодня» и спросить статус."""
+    """Выбрать 2-3 карточки из «Сегодня» и спросить статус по каждой с кнопками."""
     logger.info("Запуск card_nudge")
     try:
         s = get_settings()
@@ -674,13 +678,12 @@ async def card_nudge() -> None:
 
         for c in cards:
             due = c.get("due", "")
-            emoji = _cover_emoji(c)
             if due and due[:10] <= today_str:
-                urgent.append(f"{emoji} {c['name']}")
+                urgent.append(c)
             else:
-                rest.append(f"{emoji} {c['name']}")
+                rest.append(c)
 
-        # Показать до 3 срочных, если мало — добрать из остальных
+        # До 3 срочных, потом остальные
         nudge_cards = urgent[:3]
         if len(nudge_cards) < 3:
             nudge_cards += rest[:3 - len(nudge_cards)]
@@ -689,22 +692,78 @@ async def card_nudge() -> None:
             return
 
         hour = now.hour
-        if hour < 14:
-            greeting = "Полдня позади."
-        else:
-            greeting = "День идёт к концу."
+        greeting = "Полдня позади." if hour < 14 else "День идёт к концу."
 
-        lines = [f"{greeting} Как дела с задачами?\n"]
-        for name in nudge_cards:
-            lines.append(f"  — {name}")
-        lines.append(f"\nВсего в «Сегодня»: {len(cards)}")
-        lines.append("Скинь апдейт или скажи что перенести.")
+        await _bot.send_message(
+            s.telegram_owner_id,
+            f"{greeting} Пройдёмся по задачам ({len(cards)} в «Сегодня»):",
+        )
 
-        await _bot.send_message(s.telegram_owner_id, "\n".join(lines))
+        # Отправить каждую карточку с кнопками
+        for c in nudge_cards:
+            emoji = _cover_emoji(c)
+            card_id = c["id"]
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="✅ Сделано", callback_data=f"nudge_done_{card_id}"),
+                InlineKeyboardButton(text="🔄 В процессе", callback_data=f"nudge_wip_{card_id}"),
+                InlineKeyboardButton(text="⏭ Перенести", callback_data=f"nudge_postpone_{card_id}"),
+            ]])
+            await _bot.send_message(
+                s.telegram_owner_id,
+                f"{emoji} <b>{c['name']}</b>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb,
+            )
+
         logger.info("card_nudge: отправлено ({} карточек)", len(nudge_cards))
 
     except Exception as e:
         logger.error("Ошибка card_nudge: {}", e)
+
+
+# ─────────────────────────────────────────────
+# Nudge callback handlers
+# ─────────────────────────────────────────────
+
+@nudge_router.callback_query(lambda c: c.data and c.data.startswith("nudge_"))
+async def on_nudge_callback(callback: CallbackQuery) -> None:
+    data = callback.data
+    await callback.answer()
+
+    # Парсим: nudge_{action}_{card_id}
+    parts = data.split("_", 2)
+    if len(parts) < 3:
+        return
+    action = parts[1]
+    card_id = parts[2]
+
+    try:
+        card = await _trello.get_card(card_id)
+        card_name = card.get("name", "?")
+    except Exception:
+        card_name = "?"
+
+    if action == "done":
+        try:
+            await _trello.archive_card(card_id)
+            await callback.message.edit_text(f"✅ <b>{card_name}</b> — архивировал.", parse_mode=ParseMode.HTML)
+        except Exception as e:
+            logger.error("Nudge done ошибка {}: {}", card_id, e)
+
+    elif action == "wip":
+        await callback.message.edit_text(f"🔄 <b>{card_name}</b> — ок, работаешь.", parse_mode=ParseMode.HTML)
+
+    elif action == "postpone":
+        try:
+            # Перенести дедлайн на завтра
+            tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%dT09:00:00")
+            await _trello.update_card(card_id, due=tomorrow)
+            await callback.message.edit_text(
+                f"⏭ <b>{card_name}</b> — перенёс на завтра.",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as e:
+            logger.error("Nudge postpone ошибка {}: {}", card_id, e)
 
 
 # ─────────────────────────────────────────────

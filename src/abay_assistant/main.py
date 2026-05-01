@@ -14,6 +14,7 @@ from abay_assistant.bot.evening import setup as setup_evening, evening_router
 from abay_assistant.bot.crm_browser import crm_router, setup_crm
 from abay_assistant.bot.scheduled import (
     setup as setup_scheduled,
+    nudge_router,
     morning_briefing,
     noon_checkin,
     evening_review,
@@ -109,6 +110,7 @@ async def main() -> None:
 
     dp = Dispatcher()
     dp.include_router(evening_router)
+    dp.include_router(nudge_router)
     dp.include_router(crm_router)
     dp.include_router(router)
 
