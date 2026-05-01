@@ -808,14 +808,9 @@ async def forgotten_contacts() -> None:
 # ─────────────────────────────────────────────
 
 async def daily_summary_for_assistant() -> None:
-    """Сводка дня для Абая: что произошло, какие карточки двигались."""
+    """Сводка дня: отправляется в группу и ассистенту."""
     logger.info("Запуск daily_summary_for_assistant")
     try:
-        s = get_settings()
-        if not s.telegram_assistant_id:
-            logger.info("daily_summary_for_assistant: assistant_id не настроен")
-            return
-
         now = datetime.now()
         today_str = now.strftime("%Y-%m-%d")
 
@@ -847,7 +842,7 @@ async def daily_summary_for_assistant() -> None:
             context += f"\nДневная заметка:\n{daily_note[:1000]}\n"
 
         system = (
-            "Ты готовишь краткую сводку дня для ассистента Абая. "
+            "Ты готовишь краткую сводку дня. "
             "Пиши на русском, кратко (5-10 строк). Включи: "
             "ключевые действия за день, текущий статус задач, что примечательного. "
             "Не повторяй сырые данные — интерпретируй и резюмируй."
@@ -859,19 +854,11 @@ async def daily_summary_for_assistant() -> None:
             max_tokens=1024,
         )
 
-        from abay_assistant.bot.handlers import _md_to_html
-        html = _md_to_html(summary)
-        header = f"<b>📋 Сводка дня ({today_str}):</b>\n\n"
-        try:
-            await _bot.send_message(
-                s.telegram_assistant_id,
-                header + html,
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception:
-            await _bot.send_message(s.telegram_assistant_id, f"Сводка дня ({today_str}):\n\n{summary}")
+        # Отправить в группу (или всем)
+        header = f"📋 **Сводка дня ({today_str}):**\n\n"
+        await _send_to_all(header + summary)
 
-        logger.info("daily_summary_for_assistant отправлен")
+        logger.info("daily_summary отправлен")
 
     except Exception as e:
         logger.error("Ошибка daily_summary_for_assistant: {}", e)
