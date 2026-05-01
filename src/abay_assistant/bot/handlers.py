@@ -51,6 +51,10 @@ _crm_names_cache: list[str] = []
 _crm_names_cache_ts: float = 0.0
 _CRM_CACHE_TTL = 300  # 5 минут
 
+# CRM-контекст для system prompt
+_crm_context_cache: str = ""
+_crm_context_cache_ts: float = 0.0
+
 
 def setup(
     llm: LLMClient,
@@ -108,10 +112,70 @@ async def _check_access(message: TgMessage) -> str | None:
     return role
 
 
-def _build_system_prompt(role: str) -> str:
+async def _build_system_prompt(role: str) -> str:
     template = PROMPT_PATH.read_text(encoding="utf-8")
     now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
-    return template.replace("{role}", role).replace("{now}", now)
+    prompt = template.replace("{role}", role).replace("{now}", now)
+
+    # Подгрузить CRM-контекст (люди + проекты)
+    crm_context = await _get_crm_context()
+    if crm_context:
+        prompt += "\n\n## Справочник CRM (люди и проекты)\n\n" + crm_context
+
+    return prompt
+
+
+async def _get_crm_context() -> str:
+    """Сформировать краткий справочник из CRM для system prompt. Кеш 5 мин."""
+    global _crm_context_cache, _crm_context_cache_ts
+    now = time.monotonic()
+    if _crm_context_cache and (now - _crm_context_cache_ts) < _CRM_CACHE_TTL:
+        return _crm_context_cache
+
+    try:
+        lines = []
+
+        # Люди
+        people = await _obsidian.list_entities("person")
+        if people:
+            lines.append("### Люди")
+            for p in people:
+                name = p.get("name", "")
+                role_str = p.get("role", "")
+                projects = p.get("projects", [])
+                proj_str = ", ".join(str(pr) for pr in projects) if projects else ""
+                parts = [f"- **{name}**"]
+                if role_str:
+                    parts.append(f"({role_str})")
+                if proj_str:
+                    parts.append(f"— проекты: {proj_str}")
+                lines.append(" ".join(parts))
+
+        # Проекты
+        projects = await _obsidian.list_entities("project")
+        if projects:
+            lines.append("\n### Проекты")
+            for pr in projects:
+                name = pr.get("name", "")
+                zone = pr.get("zone", "")
+                status = pr.get("status", "")
+                people_list = pr.get("people", [])
+                ppl_str = ", ".join(str(p) for p in people_list) if people_list else ""
+                parts = [f"- **{name}**"]
+                if zone:
+                    parts.append(f"[{zone}]")
+                if status:
+                    parts.append(f"({status})")
+                if ppl_str:
+                    parts.append(f"— участники: {ppl_str}")
+                lines.append(" ".join(parts))
+
+        _crm_context_cache = "\n".join(lines)
+        _crm_context_cache_ts = now
+    except Exception as e:
+        logger.debug("CRM context load failed: {}", e)
+
+    return _crm_context_cache
 
 
 def _db_messages_to_llm(db_msgs: list) -> list[dict]:
@@ -675,7 +739,7 @@ async def _process_inbox(message: TgMessage, role: str, text: str) -> None:
     llm_messages = _db_messages_to_llm(recent)
 
     # 3. Системный промпт
-    system = _build_system_prompt(role)
+    system = await _build_system_prompt(role)
 
     # 4. Показать индикатор «печатает...»
     await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
