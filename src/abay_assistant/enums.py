@@ -42,6 +42,7 @@ class TrelloList(StrEnum):
     STUDY = "Изучить"
     BACKLOG = "Backlog"
     DONE = "Готово"
+    ARCHIVE = "архив"
     NEXT_YEAR = "В следующем году"
 
 

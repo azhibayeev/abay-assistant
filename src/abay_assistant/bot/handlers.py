@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from aiogram import Router, F, Bot
-from aiogram.enums import ParseMode
+from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import CommandStart
 from aiogram.types import Message as TgMessage
 from loguru import logger
@@ -677,9 +677,8 @@ async def _process_inbox(message: TgMessage, role: str, text: str) -> None:
     # 3. Системный промпт
     system = _build_system_prompt(role)
 
-    # 4. Для длинных сообщений — показать статус
-    if len(text) > 500:
-        await message.answer("Обрабатываю...")
+    # 4. Показать индикатор «печатает...»
+    await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
     # 5. Вызов LLM с tools
     try:
@@ -701,7 +700,7 @@ async def _process_inbox(message: TgMessage, role: str, text: str) -> None:
 
     # 6. Обработка tool_use в цикле (до MAX_TOOL_ROUNDS раундов)
     context = {"telegram_id": tid}
-    reply_text = await _process_response(resp, llm_messages, system, context)
+    reply_text = await _process_response(resp, llm_messages, system, context, message=message)
 
     # 6. Отправить ответ
     if reply_text:
@@ -802,7 +801,8 @@ def _describe_tool_action(tool_name: str, tool_input: dict) -> str:
 
 
 async def _process_response(
-    resp, messages: list[dict], system: str, context: dict | None = None
+    resp, messages: list[dict], system: str, context: dict | None = None,
+    *, message: TgMessage | None = None,
 ) -> str:
     """Обработать ответ LLM: выполнить tool calls если есть, вернуть финальный текст.
 
@@ -851,6 +851,13 @@ async def _process_response(
 
         # Обрезать старые tool results чтобы контекст не разрастался
         current_messages = _truncate_tool_results(current_messages, keep_recent=2)
+
+        # Обновить typing-индикатор перед следующим раундом
+        if message:
+            try:
+                await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+            except Exception:
+                pass
 
         # Вызвать LLM снова
         try:

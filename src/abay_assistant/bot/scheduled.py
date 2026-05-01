@@ -218,11 +218,14 @@ async def board_cleanup() -> None:
                     await _trello.update_card(keeper["id"], desc=dupe_desc)
                 await _trello.add_comment(
                     keeper["id"],
-                    f"🔄 Дубль «{dupe['name']}» объединён и архивирован.",
+                    f"🔄 Дубль «{dupe['name']}» объединён и перемещён в архив.",
                 )
-                await _trello.archive_card(dupe["id"])
+                try:
+                    await _trello.move_card(dupe["id"], TrelloList.ARCHIVE)
+                except ValueError:
+                    await _trello.archive_card(dupe["id"])
                 actions.append(f"Дубль: «{dupe['name']}» → архив (оставил «{keeper['name']}»)")
-                logger.info("Дубль архивирован: '{}' (оставил '{}')", dupe["name"], keeper["name"])
+                logger.info("Дубль в архив: '{}' (оставил '{}')", dupe["name"], keeper["name"])
             except Exception as e:
                 logger.error("Ошибка при чистке дубля '{}': {}", dupe["name"], e)
 

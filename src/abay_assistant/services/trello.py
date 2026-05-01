@@ -1,6 +1,7 @@
 """Trello API клиент — реальная реализация через httpx."""
 
 import asyncio
+import time
 from typing import Any
 
 import httpx
@@ -22,6 +23,7 @@ class TrelloClient:
         self._auth = {"key": s.trello_api_key, "token": s.trello_token}
         self._board_id = s.trello_board_id
         self._lists_cache: dict[str, str] = {}  # name -> id
+        self._lists_cache_ts: float = 0  # время последнего обновления
 
     # ------------------------------------------------------------------
     # internal helpers
@@ -62,11 +64,23 @@ class TrelloClient:
         raise last_error
 
     async def _ensure_lists_cache(self) -> None:
-        if not self._lists_cache:
+        # Обновлять кэш каждые 5 минут чтобы подхватывать новые колонки
+        if not self._lists_cache or (time.monotonic() - self._lists_cache_ts) > 300:
             await self.get_lists()
 
     async def _list_id_by_name(self, list_name: str) -> str:
         await self._ensure_lists_cache()
+        result = self._find_list(list_name)
+        if result:
+            return result
+        # Не нашли — принудительно обновить кэш (колонку могли только что создать)
+        await self.get_lists()
+        result = self._find_list(list_name)
+        if result:
+            return result
+        raise ValueError(f"Список '{list_name}' не найден на доске")
+
+    def _find_list(self, list_name: str) -> str | None:
         lower = list_name.lower()
         # Точное совпадение (case-insensitive)
         for name, lid in self._lists_cache.items():
@@ -76,7 +90,7 @@ class TrelloClient:
         for name, lid in self._lists_cache.items():
             if lower in name.lower():
                 return lid
-        raise ValueError(f"Список '{list_name}' не найден на доске")
+        return None
 
     # ------------------------------------------------------------------
     # public methods
@@ -86,6 +100,7 @@ class TrelloClient:
         """Получить все списки доски. Возвращает {name: id}."""
         data = await self._request("GET", f"/boards/{self._board_id}/lists")
         self._lists_cache = {item["name"]: item["id"] for item in data}
+        self._lists_cache_ts = time.monotonic()
         logger.debug("Trello lists: {}", list(self._lists_cache.keys()))
         return self._lists_cache
 
