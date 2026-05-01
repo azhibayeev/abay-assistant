@@ -17,6 +17,17 @@ RATE_LIMIT_RETRIES = 5
 RATE_LIMIT_DELAYS = [5, 15, 30, 60, 120]  # для 429 — дольше и больше попыток
 
 
+def _with_cache_control(system: str) -> list[dict]:
+    """Обернуть system prompt в формат с prompt caching."""
+    return [
+        {
+            "type": "text",
+            "text": system,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+
 class LLMClient:
     """Клиент для Anthropic Claude API."""
 
@@ -77,12 +88,13 @@ class LLMClient:
             "messages": messages,
         }
         if system:
-            kwargs["system"] = system
+            kwargs["system"] = _with_cache_control(system)
 
         resp = await self._retry(self._client.messages.create, **kwargs)
         text = resp.content[0].text if resp.content else ""
-        logger.debug("LLM chat: {} input / {} output tokens",
-                      resp.usage.input_tokens, resp.usage.output_tokens)
+        cache = getattr(resp.usage, "cache_read_input_tokens", 0) or 0
+        logger.debug("LLM chat: {} input / {} output / {} cached tokens",
+                      resp.usage.input_tokens, resp.usage.output_tokens, cache)
         return text
 
     async def chat_with_tools(
@@ -100,13 +112,15 @@ class LLMClient:
             "tools": tools,
         }
         if system:
-            kwargs["system"] = system
+            kwargs["system"] = _with_cache_control(system)
 
         resp = await self._retry(self._client.messages.create, **kwargs)
+        cache = getattr(resp.usage, "cache_read_input_tokens", 0) or 0
         logger.debug(
-            "LLM chat_with_tools: {} input / {} output tokens, stop={}",
+            "LLM chat_with_tools: {} input / {} output / {} cached, stop={}",
             resp.usage.input_tokens,
             resp.usage.output_tokens,
+            cache,
             resp.stop_reason,
         )
         return resp
