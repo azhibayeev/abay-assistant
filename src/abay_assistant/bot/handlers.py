@@ -159,8 +159,12 @@ async def _get_crm_context() -> str:
                 name = pr.get("name", "")
                 zone = pr.get("zone", "")
                 status = pr.get("status", "")
+                description = pr.get("description", "")
                 people_list = pr.get("people", [])
+                trello_cards = pr.get("trello_cards", [])
+                decisions = pr.get("decision_log", [])
                 ppl_str = ", ".join(str(p) for p in people_list) if people_list else ""
+
                 parts = [f"- **{name}**"]
                 if zone:
                     parts.append(f"[{zone}]")
@@ -169,6 +173,16 @@ async def _get_crm_context() -> str:
                 if ppl_str:
                     parts.append(f"— участники: {ppl_str}")
                 lines.append(" ".join(parts))
+
+                if description:
+                    lines.append(f"  _{description}_")
+                if trello_cards:
+                    cards_str = ", ".join(str(c) for c in trello_cards)
+                    lines.append(f"  Trello-карточки: {cards_str}")
+                if decisions:
+                    lines.append("  Ключевые решения:")
+                    for d in decisions[-3:]:  # последние 3
+                        lines.append(f"    • {d}")
 
         _crm_context_cache = "\n".join(lines)
         _crm_context_cache_ts = now
