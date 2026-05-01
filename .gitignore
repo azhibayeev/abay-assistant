@@ -43,6 +43,9 @@ abay-assistant-architecture.md
 credentials.json
 token.json
 
+# Deploy
+deploy.sh
+
 # Logs
 logs/
 *.log
