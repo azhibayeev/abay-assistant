@@ -55,8 +55,7 @@ def setup_scheduler(scheduler: AsyncIOScheduler) -> None:
     scheduler.add_job(morning_briefing, "cron", hour=9, minute=0)
     # 11:00 — пинг «Мяч на стороне» (>5 дней без активности)
     scheduler.add_job(waiting_ping, "cron", hour=11, minute=0)
-    # 12:00 и 16:00 — интерактивный nudge по карточкам
-    scheduler.add_job(card_nudge, "cron", hour=12, minute=0)
+    # 16:00 — интерактивный nudge по карточкам
     scheduler.add_job(card_nudge, "cron", hour=16, minute=0)
     # 20:00 — застрявшие задачи (интерактивный)
     scheduler.add_job(stuck_tasks, "cron", hour=20, minute=0)
@@ -80,7 +79,7 @@ def setup_scheduler(scheduler: AsyncIOScheduler) -> None:
     scheduler.add_job(update_list_names, "cron", day_of_week="mon", hour=0, minute=10)
     logger.info(
         "Расписание: 8:30 sort, 8:50 cleanup, 9:00 утро, 11:00 waiting-ping, "
-        "12/16 nudge, 20:00 stuck, 22:30 вечер, пн 0:10 list-names, "
+        "16:00 nudge, 20:00 stuck, 22:30 вечер, пн 0:10 list-names, "
         "вс 20:00 контакты, вс 21:00 weekly, meeting_prep/5мин, напоминания/60с (Asia/Almaty)"
     )
 
