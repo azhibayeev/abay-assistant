@@ -468,8 +468,10 @@ def _find_stuck_cards(cards: list[dict], stale_days: int = 3) -> list[dict]:
             if activity_naive < cutoff:
                 days_inactive = (datetime.now() - activity_naive).days
                 result.append({
+                    "id": c["id"],
                     "name": c["name"],
                     "days_inactive": days_inactive,
+                    "cover": c.get("cover"),
                 })
         except (ValueError, TypeError):
             continue
@@ -622,36 +624,40 @@ async def forgotten_contacts() -> None:
 # ─────────────────────────────────────────────
 
 async def stuck_tasks() -> None:
-    """Ежедневный скан: карточки без активности >3 дней + просроченные."""
+    """Ежедневный скан: карточки без активности >3 дней — интерактивно."""
     logger.info("Запуск stuck_tasks")
     try:
         s = get_settings()
-        parts = []
 
-        # Застряли в «Сегодня»
         today_raw = await _trello.get_cards(TrelloList.TODAY)
         stuck = _find_stuck_cards(today_raw, stale_days=3)
-        if stuck:
-            lines = ["Застряли в «Сегодня» (без активности >3 дней):"]
-            for c in stuck[:7]:
-                lines.append(f"  — {c['name']} ({c['days_inactive']} дн.)")
-            lines.append("Перенести в Backlog, завершить или удалить?")
-            parts.append("\n".join(lines))
 
-        # Просроченные
-        overdue = await _get_overdue_cards()
-        if overdue:
-            lines = ["Просроченные задачи:"]
-            for c in overdue[:7]:
-                lines.append(f"  — {c['name']} (срок: {c['due']}, список: {c['list']})")
-            parts.append("\n".join(lines))
-
-        if not parts:
+        if not stuck:
             logger.info("stuck_tasks: нет проблемных задач")
             return
 
-        await _bot.send_message(s.telegram_owner_id, "\n\n".join(parts))
-        logger.info("stuck_tasks: уведомление отправлено")
+        await _bot.send_message(
+            s.telegram_owner_id,
+            f"Застряли в «Сегодня» без активности >3 дней ({len(stuck)}):",
+        )
+
+        for c in stuck[:5]:
+            emoji = _cover_emoji(c)
+            card_id = c["id"]
+            days = c["days_inactive"]
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="✅ Сделано", callback_data=f"nudge_done_{card_id}"),
+                InlineKeyboardButton(text="📦 Backlog", callback_data=f"stuck_backlog_{card_id}"),
+                InlineKeyboardButton(text="🗑 Архив", callback_data=f"stuck_archive_{card_id}"),
+            ]])
+            await _bot.send_message(
+                s.telegram_owner_id,
+                f"{emoji} <b>{c['name']}</b> — {days} дн. без активности",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb,
+            )
+
+        logger.info("stuck_tasks: отправлено ({} карточек)", len(stuck))
 
     except Exception as e:
         logger.error("Ошибка stuck_tasks: {}", e)
@@ -725,12 +731,14 @@ async def card_nudge() -> None:
 # Nudge callback handlers
 # ─────────────────────────────────────────────
 
-@nudge_router.callback_query(lambda c: c.data and c.data.startswith("nudge_"))
+@nudge_router.callback_query(lambda c: c.data and (
+    c.data.startswith("nudge_") or c.data.startswith("stuck_") or c.data.startswith("wait_")
+))
 async def on_nudge_callback(callback: CallbackQuery) -> None:
     data = callback.data
     await callback.answer()
 
-    # Парсим: nudge_{action}_{card_id}
+    # Парсим: {prefix}_{action}_{card_id}
     parts = data.split("_", 2)
     if len(parts) < 3:
         return
@@ -743,27 +751,76 @@ async def on_nudge_callback(callback: CallbackQuery) -> None:
     except Exception:
         card_name = "?"
 
-    if action == "done":
-        try:
+    try:
+        if action == "done":
             await _trello.archive_card(card_id)
             await callback.message.edit_text(f"✅ <b>{card_name}</b> — архивировал.", parse_mode=ParseMode.HTML)
-        except Exception as e:
-            logger.error("Nudge done ошибка {}: {}", card_id, e)
 
-    elif action == "wip":
-        await callback.message.edit_text(f"🔄 <b>{card_name}</b> — ок, работаешь.", parse_mode=ParseMode.HTML)
+        elif action == "wip":
+            await callback.message.edit_text(f"🔄 <b>{card_name}</b> — ок, работаешь.", parse_mode=ParseMode.HTML)
 
-    elif action == "postpone":
-        try:
-            # Перенести дедлайн на завтра
+        elif action == "postpone":
             tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%dT09:00:00")
             await _trello.update_card(card_id, due=tomorrow)
-            await callback.message.edit_text(
-                f"⏭ <b>{card_name}</b> — перенёс на завтра.",
+            await callback.message.edit_text(f"⏭ <b>{card_name}</b> — перенёс на завтра.", parse_mode=ParseMode.HTML)
+
+        elif action == "backlog":
+            await _trello.move_card(card_id, TrelloList.BACKLOG)
+            await callback.message.edit_text(f"📦 <b>{card_name}</b> — в Backlog.", parse_mode=ParseMode.HTML)
+
+        elif action == "archive":
+            await _trello.archive_card(card_id)
+            await callback.message.edit_text(f"🗑 <b>{card_name}</b> — архивировал.", parse_mode=ParseMode.HTML)
+
+        elif action == "ok":
+            await callback.message.edit_text(f"👌 <b>{card_name}</b> — ок, ждём.", parse_mode=ParseMode.HTML)
+
+    except Exception as e:
+        logger.error("Callback {} ошибка {}: {}", action, card_id, e)
+
+
+# ─────────────────────────────────────────────
+# 11:00 — Пинг «Мяч на стороне»
+# ─────────────────────────────────────────────
+
+async def waiting_ping() -> None:
+    """Карточки из «Мяч на стороне» без активности >5 дней — интерактивный пинг."""
+    logger.info("Запуск waiting_ping")
+    try:
+        s = get_settings()
+        cards = await _trello.get_cards(TrelloList.WAITING)
+        if not cards:
+            return
+
+        stale = _find_stuck_cards(cards, stale_days=5)
+        if not stale:
+            logger.info("waiting_ping: нет зависших карточек")
+            return
+
+        await _bot.send_message(
+            s.telegram_owner_id,
+            f"🤝 «Мяч на стороне» — {len(stale)} карточек без движения >5 дней:",
+        )
+
+        for c in stale[:5]:
+            card_id = c["id"]
+            days = c["days_inactive"]
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="📩 Напомнить", callback_data=f"wait_wip_{card_id}"),
+                InlineKeyboardButton(text="👌 Ждём", callback_data=f"wait_ok_{card_id}"),
+                InlineKeyboardButton(text="🗑 Архив", callback_data=f"wait_archive_{card_id}"),
+            ]])
+            await _bot.send_message(
+                s.telegram_owner_id,
+                f"<b>{c['name']}</b> — {days} дн.",
                 parse_mode=ParseMode.HTML,
+                reply_markup=kb,
             )
-        except Exception as e:
-            logger.error("Nudge postpone ошибка {}: {}", card_id, e)
+
+        logger.info("waiting_ping: отправлено ({} карточек)", len(stale))
+
+    except Exception as e:
+        logger.error("Ошибка waiting_ping: {}", e)
 
 
 # ─────────────────────────────────────────────

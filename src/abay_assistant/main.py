@@ -16,7 +16,6 @@ from abay_assistant.bot.scheduled import (
     setup as setup_scheduled,
     nudge_router,
     morning_briefing,
-    noon_checkin,
     evening_review,
     weekly_report,
     check_reminders,
@@ -27,6 +26,7 @@ from abay_assistant.bot.scheduled import (
     sort_cards_by_due,
     update_list_names,
     card_nudge,
+    waiting_ping,
 )
 from abay_assistant.services.llm import LLMClient
 from abay_assistant.services.trello import TrelloClient
@@ -52,33 +52,33 @@ def setup_scheduler(scheduler: AsyncIOScheduler) -> None:
     """Настроить cron-задачи. Часовой пояс — Алматы (GMT+5)."""
     # 9:00 — утренняя сводка
     scheduler.add_job(morning_briefing, "cron", hour=9, minute=0)
-    # 14:00 — полуденный чек-ин
-    scheduler.add_job(noon_checkin, "cron", hour=14, minute=0)
+    # 11:00 — пинг «Мяч на стороне» (>5 дней без активности)
+    scheduler.add_job(waiting_ping, "cron", hour=11, minute=0)
+    # 12:00 и 16:00 — интерактивный nudge по карточкам
+    scheduler.add_job(card_nudge, "cron", hour=12, minute=0)
+    scheduler.add_job(card_nudge, "cron", hour=16, minute=0)
+    # 20:00 — застрявшие задачи (интерактивный)
+    scheduler.add_job(stuck_tasks, "cron", hour=20, minute=0)
     # 22:30 — вечерний свод
     scheduler.add_job(evening_review, "cron", hour=22, minute=30)
     # Воскресенье 21:00 — еженедельный отчёт
     scheduler.add_job(weekly_report, "cron", day_of_week="sun", hour=21, minute=0)
+    # Воскресенье 20:00 — забытые контакты
+    scheduler.add_job(forgotten_contacts, "cron", day_of_week="sun", hour=20, minute=0)
     # Каждые 60 секунд — проверка напоминаний
     scheduler.add_job(check_reminders, "interval", seconds=60)
     # Каждые 10 минут — очистка зависших вечерних сессий
     scheduler.add_job(cleanup_sessions, "interval", minutes=10)
     # Каждые 5 минут — подготовка к встречам (CRM-контекст)
     scheduler.add_job(meeting_prep, "interval", minutes=5)
-    # Воскресенье 20:00 — забытые контакты
-    scheduler.add_job(forgotten_contacts, "cron", day_of_week="sun", hour=20, minute=0)
-    # Каждый день 20:00 — застрявшие задачи
-    scheduler.add_job(stuck_tasks, "cron", hour=20, minute=0)
     # Каждый день 8:30 — авто-сортировка карточек по дедлайну
     scheduler.add_job(sort_cards_by_due, "cron", hour=8, minute=30)
     # Понедельник 0:10 — обновить названия колонок (неделя + месяц)
     scheduler.add_job(update_list_names, "cron", day_of_week="mon", hour=0, minute=10)
-    # 12:00 и 16:00 — напоминание по карточкам
-    scheduler.add_job(card_nudge, "cron", hour=12, minute=0)
-    scheduler.add_job(card_nudge, "cron", hour=16, minute=0)
     logger.info(
-        "Расписание: 8:30 sort, 9:00 утро, 12/16 nudge, 14:00 чек-ин, 20:00 stuck, "
-        "22:30 вечер, пн 0:10 list-names, вс 20:00 контакты, вс 21:00 weekly, "
-        "meeting_prep/5мин, напоминания/60с (Asia/Almaty)"
+        "Расписание: 8:30 sort, 9:00 утро, 11:00 waiting-ping, 12/16 nudge, "
+        "20:00 stuck, 22:30 вечер, пн 0:10 list-names, вс 20:00 контакты, "
+        "вс 21:00 weekly, meeting_prep/5мин, напоминания/60с (Asia/Almaty)"
     )
 
 
