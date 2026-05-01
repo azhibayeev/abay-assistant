@@ -12,7 +12,9 @@ from abay_assistant.config import get_settings
 MODEL = "claude-sonnet-4-20250514"
 MAX_TOKENS = 1024
 MAX_RETRIES = 3
-RETRY_DELAYS = [2, 5, 10]  # секунды между попытками
+RETRY_DELAYS = [2, 5, 10]  # секунды между попытками (timeout/connection)
+RATE_LIMIT_RETRIES = 5
+RATE_LIMIT_DELAYS = [5, 15, 30, 60, 120]  # для 429 — дольше и больше попыток
 
 
 class LLMClient:
@@ -25,20 +27,33 @@ class LLMClient:
         )
 
     async def _retry(self, func, **kwargs) -> Any:
-        """Вызов с retry при timeout/overloaded/rate-limit ошибках."""
+        """Вызов с retry. Rate limit получает больше попыток и длиннее паузы."""
         last_error = None
-        for attempt in range(MAX_RETRIES):
+        max_attempts = max(MAX_RETRIES, RATE_LIMIT_RETRIES)
+
+        for attempt in range(max_attempts):
             try:
                 return await func(**kwargs)
+            except anthropic.RateLimitError as e:
+                last_error = e
+                if attempt < RATE_LIMIT_RETRIES - 1:
+                    delay = RATE_LIMIT_DELAYS[min(attempt, len(RATE_LIMIT_DELAYS) - 1)]
+                    logger.warning(
+                        "LLM rate limit (попытка {}/{}): {}. Повтор через {}с",
+                        attempt + 1, RATE_LIMIT_RETRIES, type(e).__name__, delay,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error("LLM rate limit после {} попыток: {}", RATE_LIMIT_RETRIES, e)
+                    raise
             except (
                 anthropic.APITimeoutError,
-                anthropic.RateLimitError,
                 anthropic.InternalServerError,
                 anthropic.APIConnectionError,
             ) as e:
                 last_error = e
                 if attempt < MAX_RETRIES - 1:
-                    delay = RETRY_DELAYS[attempt]
+                    delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
                     logger.warning(
                         "LLM ошибка (попытка {}/{}): {}. Повтор через {}с",
                         attempt + 1, MAX_RETRIES, type(e).__name__, delay,
@@ -46,6 +61,7 @@ class LLMClient:
                     await asyncio.sleep(delay)
                 else:
                     logger.error("LLM ошибка после {} попыток: {}", MAX_RETRIES, e)
+                    raise
         raise last_error
 
     async def chat(

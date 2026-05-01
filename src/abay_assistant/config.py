@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///abay.db"
     timezone: str = "Asia/Almaty"
 
+    # Webhook (опционально — если не задан, используется polling)
+    webhook_url: str = ""
+    webhook_port: int = 8443
+    webhook_cert_path: str = ""
+    webhook_key_path: str = ""
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

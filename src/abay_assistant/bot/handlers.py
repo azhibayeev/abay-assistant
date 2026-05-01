@@ -680,22 +680,33 @@ async def _process_inbox(message: TgMessage, role: str, text: str) -> None:
     # 4. Показать индикатор «печатает...»
     await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
-    # 5. Вызов LLM с tools
-    try:
-        resp = await _llm.chat_with_tools(
-            messages=llm_messages,
-            tools=TOOLS,
-            system=system,
-        )
-    except Exception as e:
-        error_type = type(e).__name__
-        logger.error("LLM ошибка ({}): {}", error_type, e)
-        if "timeout" in str(e).lower() or "Timeout" in error_type:
-            await message.answer("Claude не отвечает (timeout). Попробуй через минуту.")
-        elif "rate" in str(e).lower():
-            await message.answer("Слишком много запросов. Подожди немного.")
-        else:
-            await message.answer("Произошла ошибка при обработке. Попробуй ещё раз.")
+    # 5. Вызов LLM с tools (с доп. retry при rate limit)
+    resp = None
+    for llm_attempt in range(2):
+        try:
+            resp = await _llm.chat_with_tools(
+                messages=llm_messages,
+                tools=TOOLS,
+                system=system,
+            )
+            break
+        except Exception as e:
+            error_type = type(e).__name__
+            logger.error("LLM ошибка попытка {} ({}): {}", llm_attempt + 1, error_type, e)
+            if llm_attempt == 0 and "rate" in str(e).lower():
+                await message.answer("Обрабатываю... подожди немного.")
+                await asyncio.sleep(30)
+                await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+                continue
+            if "timeout" in str(e).lower() or "Timeout" in error_type:
+                await message.answer("Claude не отвечает (timeout). Попробуй через минуту.")
+            elif "rate" in str(e).lower():
+                await message.answer("Слишком много запросов. Подожди минуту и попробуй снова.")
+            else:
+                await message.answer("Произошла ошибка при обработке. Попробуй ещё раз.")
+            return
+    if resp is None:
+        await message.answer("Не удалось получить ответ. Попробуй позже.")
         return
 
     # 6. Обработка tool_use в цикле (до MAX_TOOL_ROUNDS раундов)

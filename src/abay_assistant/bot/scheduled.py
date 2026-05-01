@@ -707,17 +707,17 @@ async def meeting_prep() -> None:
             if dedup_key in _notified_meetings:
                 continue
 
-            matched_name = _match_event_to_crm(summary, people)
-            if not matched_name:
-                continue
-
-            crm_text = await _obsidian.get_entity_summary("person", matched_name)
             time_str = event_start_naive.strftime("%H:%M")
-            message = f"Через ~30 мин ({time_str}): {summary}\n\nКонтекст из CRM:\n{crm_text}"
+            msg = f"⏰ Через ~30 мин ({time_str}): {summary}"
 
-            await _bot.send_message(chat_id, message)
+            matched_name = _match_event_to_crm(summary, people)
+            if matched_name:
+                crm_text = await _obsidian.get_entity_summary("person", matched_name)
+                msg += f"\n\nКонтекст из CRM:\n{crm_text}"
+
+            await _bot.send_message(chat_id, msg)
             _notified_meetings.add(dedup_key)
-            logger.info("Meeting prep: {} (CRM: {})", summary, matched_name)
+            logger.info("Meeting reminder: {} (CRM: {})", summary, matched_name or "—")
 
         # Очистить старые ключи (оставить только сегодняшние)
         today_prefix = now.strftime("%Y-%m-%d")
@@ -726,6 +726,51 @@ async def meeting_prep() -> None:
 
     except Exception as e:
         logger.error("Ошибка meeting_prep: {}", e)
+
+
+# ─────────────────────────────────────────────
+# Понедельник 0:15 — Перенос карточек с прошлой недели
+# ─────────────────────────────────────────────
+
+async def weekly_carryover() -> None:
+    """Понедельник после обновления колонок: пометить перенесённые карточки."""
+    logger.info("Запуск weekly_carryover")
+    try:
+        cards = await _trello.get_cards(TrelloList.WEEK)
+        if not cards:
+            logger.info("weekly_carryover: колонка «Неделя» пуста")
+            return
+
+        today_str = datetime.now().strftime("%d.%m.%Y")
+        commented = []
+
+        for card in cards:
+            try:
+                await _trello.add_comment(
+                    card["id"],
+                    f"📅 Перенесено с прошлой недели ({today_str})",
+                )
+                commented.append(card["name"])
+            except Exception as e:
+                logger.error("Ошибка carryover '{}': {}", card["name"], e)
+
+        if commented:
+            lines = [f"📅 <b>Перенесено с прошлой недели ({len(commented)}):</b>\n"]
+            for name in commented:
+                lines.append(f"— {name}")
+            lines.append("\nЭти карточки остались в колонке «Неделя».")
+
+            chat_id = _target_chat()
+            text = "\n".join(lines)
+            try:
+                await _bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+            except Exception:
+                await _bot.send_message(chat_id, text.replace("<b>", "").replace("</b>", ""))
+
+        logger.info("weekly_carryover: {} карточек помечено", len(commented))
+
+    except Exception as e:
+        logger.error("Ошибка weekly_carryover: {}", e)
 
 
 # ─────────────────────────────────────────────
@@ -756,6 +801,80 @@ async def forgotten_contacts() -> None:
 
     except Exception as e:
         logger.error("Ошибка forgotten_contacts: {}", e)
+
+
+# ─────────────────────────────────────────────
+# Каждый день 21:00 — Сводка дня для ассистента
+# ─────────────────────────────────────────────
+
+async def daily_summary_for_assistant() -> None:
+    """Сводка дня для Абая: что произошло, какие карточки двигались."""
+    logger.info("Запуск daily_summary_for_assistant")
+    try:
+        s = get_settings()
+        if not s.telegram_assistant_id:
+            logger.info("daily_summary_for_assistant: assistant_id не настроен")
+            return
+
+        now = datetime.now()
+        today_str = now.strftime("%Y-%m-%d")
+
+        # Собрать данные
+        from abay_assistant.db import get_message_stats, get_tool_stats
+        msg_stats = get_message_stats(days=1)
+        tool_stats = get_tool_stats(days=1)
+        today_cards = await _get_today_cards()
+        week_cards = await _safe_get_cards(TrelloList.WEEK)
+        daily_note = ""
+        try:
+            daily_note = await _obsidian.read_note(f"Daily/{today_str}.md")
+        except Exception:
+            pass
+
+        tool_summary = ", ".join(
+            f"{t['tool_name']}: {t['count']}" for t in tool_stats[:10]
+        ) if tool_stats else "нет вызовов"
+
+        context = (
+            f"Дата: {today_str}\n"
+            f"Сообщений: {msg_stats['user_messages']} от пользователя, "
+            f"{msg_stats['bot_messages']} от бота\n"
+            f"Инструменты: {tool_summary}\n"
+            f"Карточки «Сегодня»: {len(today_cards)}\n"
+            f"Карточки «Неделя»: {len(week_cards)}\n"
+        )
+        if daily_note:
+            context += f"\nДневная заметка:\n{daily_note[:1000]}\n"
+
+        system = (
+            "Ты готовишь краткую сводку дня для ассистента Абая. "
+            "Пиши на русском, кратко (5-10 строк). Включи: "
+            "ключевые действия за день, текущий статус задач, что примечательного. "
+            "Не повторяй сырые данные — интерпретируй и резюмируй."
+        )
+
+        summary = await _llm.chat(
+            messages=[{"role": "user", "content": f"Данные за день:\n{context}"}],
+            system=system,
+            max_tokens=1024,
+        )
+
+        from abay_assistant.bot.handlers import _md_to_html
+        html = _md_to_html(summary)
+        header = f"<b>📋 Сводка дня ({today_str}):</b>\n\n"
+        try:
+            await _bot.send_message(
+                s.telegram_assistant_id,
+                header + html,
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            await _bot.send_message(s.telegram_assistant_id, f"Сводка дня ({today_str}):\n\n{summary}")
+
+        logger.info("daily_summary_for_assistant отправлен")
+
+    except Exception as e:
+        logger.error("Ошибка daily_summary_for_assistant: {}", e)
 
 
 # ─────────────────────────────────────────────

@@ -1,5 +1,6 @@
 import asyncio
 import signal
+import ssl
 import sys
 import traceback
 
@@ -29,6 +30,8 @@ from abay_assistant.bot.scheduled import (
     card_nudge,
     waiting_ping,
     board_cleanup,
+    weekly_carryover,
+    daily_summary_for_assistant,
 )
 from abay_assistant.services.llm import LLMClient
 from abay_assistant.services.trello import TrelloClient
@@ -60,27 +63,32 @@ def setup_scheduler(scheduler: AsyncIOScheduler) -> None:
     scheduler.add_job(card_nudge, "cron", hour=16, minute=0)
     # 20:00 — застрявшие задачи (интерактивный)
     scheduler.add_job(stuck_tasks, "cron", hour=20, minute=0)
+    # 21:00 — сводка дня для ассистента
+    scheduler.add_job(daily_summary_for_assistant, "cron", hour=21, minute=0)
     # 22:30 — вечерний свод
     scheduler.add_job(evening_review, "cron", hour=22, minute=30)
     # Воскресенье 21:00 — еженедельный отчёт
     scheduler.add_job(weekly_report, "cron", day_of_week="sun", hour=21, minute=0)
     # Воскресенье 20:00 — забытые контакты
     scheduler.add_job(forgotten_contacts, "cron", day_of_week="sun", hour=20, minute=0)
+    # Понедельник 0:10 — обновить названия колонок (неделя + месяц)
+    scheduler.add_job(update_list_names, "cron", day_of_week="mon", hour=0, minute=10)
+    # Понедельник 0:15 — перенос карточек с прошлой недели
+    scheduler.add_job(weekly_carryover, "cron", day_of_week="mon", hour=0, minute=15)
     # Каждые 60 секунд — проверка напоминаний
     scheduler.add_job(check_reminders, "interval", seconds=60)
     # Каждые 10 минут — очистка зависших вечерних сессий
     scheduler.add_job(cleanup_sessions, "interval", minutes=10)
-    # Каждые 5 минут — подготовка к встречам (CRM-контекст)
+    # Каждые 5 минут — напоминание о встречах + CRM-контекст
     scheduler.add_job(meeting_prep, "interval", minutes=5)
     # Каждый день 8:30 — авто-сортировка карточек по дедлайну
     scheduler.add_job(sort_cards_by_due, "cron", hour=8, minute=30)
     # Каждый день 8:50 — автоматическая чистка доски (дубли + обложки)
     scheduler.add_job(board_cleanup, "cron", hour=8, minute=50)
-    # Понедельник 0:10 — обновить названия колонок (неделя + месяц)
-    scheduler.add_job(update_list_names, "cron", day_of_week="mon", hour=0, minute=10)
     logger.info(
         "Расписание: 8:30 sort, 8:50 cleanup, 9:00 утро, 11:00 waiting-ping, "
-        "16:00 nudge, 20:00 stuck, 22:30 вечер, пн 0:10 list-names, "
+        "16:00 nudge, 20:00 stuck, 21:00 summary, 22:30 вечер, "
+        "пн 0:10 list-names, пн 0:15 carryover, "
         "вс 20:00 контакты, вс 21:00 weekly, meeting_prep/5мин, напоминания/60с (Asia/Almaty)"
     )
 
@@ -123,7 +131,6 @@ async def main() -> None:
     def _shutdown_signal() -> None:
         logger.info("Получен сигнал завершения, останавливаю...")
         scheduler.shutdown(wait=False)
-        # Отменяем polling — dp.start_polling() выбросит CancelledError
         for task in asyncio.all_tasks(loop):
             task.cancel()
 
@@ -150,6 +157,15 @@ async def main() -> None:
     except Exception:
         pass
 
+    # Выбор режима: webhook или polling
+    if s.webhook_url:
+        await _run_webhook(bot, dp, s, scheduler)
+    else:
+        await _run_polling(bot, dp, s, scheduler)
+
+
+async def _run_polling(bot: Bot, dp: Dispatcher, s, scheduler) -> None:
+    """Режим polling (по умолчанию)."""
     logger.info("Бот запускается (polling)...")
     try:
         await dp.start_polling(bot)
@@ -163,6 +179,56 @@ async def main() -> None:
             pass
         await bot.session.close()
         logger.info("Бот остановлен.")
+
+
+async def _run_webhook(bot: Bot, dp: Dispatcher, s, scheduler) -> None:
+    """Режим webhook (если WEBHOOK_URL задан в .env)."""
+    from aiohttp import web
+    from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
+    webhook_path = "/webhook"
+
+    # Установить webhook в Telegram
+    wh_kwargs: dict = {"url": s.webhook_url}
+    if s.webhook_cert_path:
+        from aiogram.types import FSInputFile
+        wh_kwargs["certificate"] = FSInputFile(s.webhook_cert_path)
+
+    await bot.set_webhook(**wh_kwargs)
+    logger.info("Webhook установлен: {}", s.webhook_url)
+
+    # aiohttp сервер
+    app = web.Application()
+    handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+    handler.register(app, path=webhook_path)
+    setup_application(app, dp)
+
+    # SSL (для self-signed сертификата)
+    ssl_context = None
+    if s.webhook_cert_path and s.webhook_key_path:
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.load_cert_chain(s.webhook_cert_path, s.webhook_key_path)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", s.webhook_port, ssl_context=ssl_context)
+
+    logger.info("Webhook сервер на порту {}", s.webhook_port)
+    try:
+        await site.start()
+        await asyncio.Event().wait()  # ждём до отмены
+    except asyncio.CancelledError:
+        pass
+    finally:
+        scheduler.shutdown(wait=False)
+        await bot.delete_webhook()
+        await runner.cleanup()
+        try:
+            await bot.send_message(s.telegram_owner_id, "Бот остановлен.")
+        except Exception:
+            pass
+        await bot.session.close()
+        logger.info("Бот остановлен (webhook).")
 
 
 async def _run_with_crash_ping() -> None:
