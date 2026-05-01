@@ -227,15 +227,15 @@ class TrelloClient:
         return result
 
     async def set_cover(self, card_id: str, color: str) -> dict:
-        """Установить цвет обложки карточки (полная цветная обложка).
+        """Установить цвет обложки карточки (полоска сверху, не скрывает метки).
 
         Цвета: red, orange, green, blue, yellow, purple, pink, sky, lime, black.
         """
         card = await self._request(
             "PUT", f"/cards/{card_id}",
-            json={"cover": {"color": color, "size": "full"}},
+            json={"cover": {"color": color, "size": "normal"}},
         )
-        logger.info("Trello обложка {} → {} (full)", card_id, color)
+        logger.info("Trello обложка {} → {}", card_id, color)
         return card
 
     async def get_labels(self) -> list[dict]:
