@@ -15,6 +15,7 @@ class EveningPhase(StrEnum):
     POSTPONE_WHEN = "postpone_when"
     FAILED_REASON = "failed_reason"
     FAILED_ACTION = "failed_action"
+    WAITING_WHO = "waiting_who"
     ENERGY = "energy"
     CHARGED = "charged"
     DRAINED = "drained"
@@ -25,6 +26,7 @@ class TaskStatus(StrEnum):
     DONE = "done"
     POSTPONED = "postponed"
     FAILED = "failed"
+    WAITING = "waiting"
 
 
 class FailedAction(StrEnum):

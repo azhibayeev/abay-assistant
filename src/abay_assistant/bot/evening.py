@@ -60,11 +60,16 @@ evening_router = Router()
 
 # ─── Клавиатуры ───
 
-TASK_KB = InlineKeyboardMarkup(inline_keyboard=[[
-    InlineKeyboardButton(text="✅ Сделано", callback_data="eve_done"),
-    InlineKeyboardButton(text="⏭ Перенесено", callback_data="eve_postponed"),
-    InlineKeyboardButton(text="⛔ Не получилось", callback_data="eve_failed"),
-]])
+TASK_KB = InlineKeyboardMarkup(inline_keyboard=[
+    [
+        InlineKeyboardButton(text="✅ Сделано", callback_data="eve_done"),
+        InlineKeyboardButton(text="⏭ Перенесено", callback_data="eve_postponed"),
+    ],
+    [
+        InlineKeyboardButton(text="🤝 Мяч на стороне", callback_data="eve_waiting"),
+        InlineKeyboardButton(text="⛔ Не получилось", callback_data="eve_failed"),
+    ],
+])
 
 YESNO_KB = InlineKeyboardMarkup(inline_keyboard=[[
     InlineKeyboardButton(text="Да", callback_data="eve_followup_yes"),
@@ -122,6 +127,11 @@ async def on_evening_callback(callback: CallbackQuery) -> None:
         task.status = TaskStatus.POSTPONED
         session.phase = EveningPhase.POSTPONE_WHEN
         await _send(tid, f"⏭ <b>{task.name}</b>\n\nНа когда перенести?")
+
+    elif data == "eve_waiting" and task:
+        task.status = TaskStatus.WAITING
+        session.phase = EveningPhase.WAITING_WHO
+        await _send(tid, f"🤝 <b>{task.name}</b>\n\nНа чьей стороне мяч?")
 
     elif data == "eve_failed" and task:
         task.status = TaskStatus.FAILED
@@ -263,6 +273,29 @@ async def handle_response(telegram_id: int, text: str) -> bool:
         session.phase = EveningPhase.TASKS
         await _next_task_or_energy(session)
 
+    elif session.phase == EveningPhase.WAITING_WHO and task:
+        person = text
+        old_name = task.name
+        new_name = f"{old_name} — {person}"
+        try:
+            # Переименовать с историей
+            await _trello.add_comment(
+                task.card_id,
+                f"📝 Переименовано: «{old_name}» → «{new_name}»",
+            )
+            await _trello.update_card(task.card_id, name=new_name)
+            # Переместить в "Мяч на стороне"
+            await _trello.move_card(task.card_id, TrelloList.WAITING)
+            task.name = new_name
+            task.comment = f"мяч у {person}"
+            await _send(telegram_id, f"Переместил в «Мяч на стороне»: <b>{new_name}</b>")
+        except Exception as e:
+            logger.error("Ошибка перемещения в Мяч на стороне {}: {}", task.card_id, e)
+            await _send(telegram_id, f"Ошибка: {e}")
+        session.current_step += 1
+        session.phase = EveningPhase.TASKS
+        await _next_task_or_energy(session)
+
     elif session.phase == EveningPhase.FAILED_REASON and task:
         task.comment = text
         session.phase = EveningPhase.FAILED_ACTION
@@ -329,6 +362,7 @@ async def _finish(session: EveningSession) -> None:
     done_list = []
     postponed_list = []
     failed_list = []
+    waiting_list = []
 
     for task in session.tasks:
         if task.status == TaskStatus.DONE:
@@ -337,6 +371,8 @@ async def _finish(session: EveningSession) -> None:
             postponed_list.append(task)
         elif task.status == TaskStatus.FAILED:
             failed_list.append(task)
+        elif task.status == TaskStatus.WAITING:
+            waiting_list.append(task)
 
     # Daily note — append evening review, preserve existing content
     today = datetime.now().strftime("%Y-%m-%d")
@@ -360,6 +396,12 @@ async def _finish(session: EveningSession) -> None:
         lines.append("### Перенесено")
         for t in postponed_list:
             lines.append(f"- ⏭ {t.name} — {t.comment}")
+
+    if waiting_list:
+        lines.append("")
+        lines.append("### Мяч на стороне")
+        for t in waiting_list:
+            lines.append(f"- 🤝 {t.name}")
 
     if failed_list:
         lines.append("")
@@ -395,6 +437,7 @@ async def _finish(session: EveningSession) -> None:
         f"Записал итоги дня.\n\n"
         f"✅ Сделано: {len(done_list)}\n"
         f"⏭ Перенесено: {len(postponed_list)}\n"
+        f"🤝 Мяч на стороне: {len(waiting_list)}\n"
         f"⛔ Не получилось: {len(failed_list)}\n"
         f"Энергия: {session.energy}/5\n\n"
         f"Спокойной ночи!"
