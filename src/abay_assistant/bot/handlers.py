@@ -78,6 +78,36 @@ def _user_role(telegram_id: int) -> str:
     return UserRole.UNKNOWN
 
 
+async def _check_access(message: TgMessage) -> str | None:
+    """Проверить доступ пользователя. Возвращает роль или None (остановить обработку).
+
+    В группах: неизвестных пользователей игнорирует молча.
+    Если group_id не настроен — показывает ID чата для конфигурации.
+    """
+    role = _user_role(message.from_user.id)
+    is_group = message.chat.type in ("group", "supergroup")
+
+    if role == UserRole.UNKNOWN:
+        if not is_group:
+            await message.answer("Доступ ограничен.")
+            logger.warning("Попытка доступа от {}", message.from_user.id)
+        return None
+
+    if is_group:
+        s = get_settings()
+        if not s.telegram_group_id:
+            await message.answer(
+                f"Chat ID этой группы: <code>{message.chat.id}</code>\n"
+                f"Добавь <code>TELEGRAM_GROUP_ID={message.chat.id}</code> в .env и перезапусти бота.",
+                parse_mode=ParseMode.HTML,
+            )
+            return None
+        if message.chat.id != s.telegram_group_id:
+            return None
+
+    return role
+
+
 def _build_system_prompt(role: str) -> str:
     template = PROMPT_PATH.read_text(encoding="utf-8")
     now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
@@ -203,9 +233,8 @@ async def _send_reply(message: TgMessage, text: str) -> None:
 
 @router.message(CommandStart())
 async def cmd_start(message: TgMessage) -> None:
-    role = _user_role(message.from_user.id)
-    if role == UserRole.UNKNOWN:
-        await message.answer("Доступ ограничен.")
+    role = await _check_access(message)
+    if not role:
         return
 
     name = message.from_user.first_name or "друг"
@@ -216,9 +245,8 @@ async def cmd_start(message: TgMessage) -> None:
 @router.message(F.text == "/help")
 async def cmd_help(message: TgMessage) -> None:
     """Список доступных команд."""
-    role = _user_role(message.from_user.id)
-    if role == UserRole.UNKNOWN:
-        await message.answer("Доступ ограничен.")
+    role = await _check_access(message)
+    if not role:
         return
 
     text = (
@@ -252,9 +280,8 @@ async def cmd_help(message: TgMessage) -> None:
 @router.message(F.text == "/cancel")
 async def cmd_cancel(message: TgMessage) -> None:
     """Отменить вечерний свод или ввод заметки."""
-    role = _user_role(message.from_user.id)
-    if role == UserRole.UNKNOWN:
-        await message.answer("Доступ ограничен.")
+    role = await _check_access(message)
+    if not role:
         return
 
     tid = message.from_user.id
@@ -269,9 +296,8 @@ async def cmd_cancel(message: TgMessage) -> None:
 @router.message(F.text == "/health")
 async def cmd_health(message: TgMessage) -> None:
     """Проверка здоровья бота."""
-    role = _user_role(message.from_user.id)
-    if role == UserRole.UNKNOWN:
-        await message.answer("Доступ ограничен.")
+    role = await _check_access(message)
+    if not role:
         return
 
     checks = []
@@ -314,9 +340,8 @@ async def cmd_health(message: TgMessage) -> None:
 @router.message(F.text == "/stats")
 async def cmd_stats(message: TgMessage) -> None:
     """Статистика использования бота за 7 дней."""
-    role = _user_role(message.from_user.id)
-    if role != UserRole.OWNER:
-        await message.answer("Доступ ограничен.")
+    role = await _check_access(message)
+    if not role or role != UserRole.OWNER:
         return
 
     msg_stats = get_message_stats(days=7)
@@ -338,9 +363,8 @@ async def cmd_stats(message: TgMessage) -> None:
 @router.message(F.text.startswith("/idea"))
 async def cmd_idea(message: TgMessage) -> None:
     """Записать идею по улучшению бота или посмотреть список."""
-    role = _user_role(message.from_user.id)
-    if role == UserRole.UNKNOWN:
-        await message.answer("Доступ ограничен.")
+    role = await _check_access(message)
+    if not role:
         return
 
     parts = message.text.split(maxsplit=1)
@@ -389,9 +413,8 @@ async def cmd_idea(message: TgMessage) -> None:
 @router.message(F.text.startswith("/reminders"))
 async def cmd_reminders(message: TgMessage) -> None:
     """Показать активные напоминания и удалить по номеру."""
-    role = _user_role(message.from_user.id)
-    if role == UserRole.UNKNOWN:
-        await message.answer("Доступ ограничен.")
+    role = await _check_access(message)
+    if not role:
         return
 
     tid = message.from_user.id
@@ -425,9 +448,8 @@ async def cmd_reminders(message: TgMessage) -> None:
 @router.message(F.text.startswith("/who"))
 async def cmd_who(message: TgMessage) -> None:
     """Показать информацию о человеке из CRM."""
-    role = _user_role(message.from_user.id)
-    if role == UserRole.UNKNOWN:
-        await message.answer("Доступ ограничен.")
+    role = await _check_access(message)
+    if not role:
         return
 
     parts = message.text.split(maxsplit=1)
@@ -442,9 +464,8 @@ async def cmd_who(message: TgMessage) -> None:
 @router.message(F.text.startswith("/project"))
 async def cmd_project(message: TgMessage) -> None:
     """Показать информацию о проекте из CRM."""
-    role = _user_role(message.from_user.id)
-    if role == UserRole.UNKNOWN:
-        await message.answer("Доступ ограничен.")
+    role = await _check_access(message)
+    if not role:
         return
 
     parts = message.text.split(maxsplit=1)
@@ -469,9 +490,8 @@ async def _send_html(message: TgMessage, text: str) -> None:
 @router.message(F.text == "/evening")
 async def cmd_evening(message: TgMessage) -> None:
     """Запустить вечерний свод вручную."""
-    role = _user_role(message.from_user.id)
-    if role == UserRole.UNKNOWN:
-        await message.answer("Доступ ограничен.")
+    role = await _check_access(message)
+    if not role:
         return
 
     raw_cards = await _trello.get_cards(TrelloList.TODAY)
@@ -482,9 +502,8 @@ async def cmd_evening(message: TgMessage) -> None:
 @router.message(F.voice)
 async def handle_voice(message: TgMessage, bot: Bot) -> None:
     """Голосовое сообщение: скачать → Whisper → обработать как текст."""
-    role = _user_role(message.from_user.id)
-    if role == UserRole.UNKNOWN:
-        await message.answer("Доступ ограничен.")
+    role = await _check_access(message)
+    if not role:
         return
 
     if not _whisper or not _whisper.enabled:
@@ -522,10 +541,8 @@ async def handle_voice(message: TgMessage, bot: Bot) -> None:
 
 @router.message(F.text)
 async def handle_text(message: TgMessage) -> None:
-    role = _user_role(message.from_user.id)
-    if role == UserRole.UNKNOWN:
-        await message.answer("Доступ ограничен.")
-        logger.warning("Попытка доступа от {}", message.from_user.id)
+    role = await _check_access(message)
+    if not role:
         return
 
     tid = message.from_user.id

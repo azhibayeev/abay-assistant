@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     telegram_bot_token: str
     telegram_owner_id: int
     telegram_assistant_id: int = 0
+    telegram_group_id: int = 0
 
     anthropic_api_key: str = ""
     groq_api_key: str = ""

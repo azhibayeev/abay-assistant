@@ -529,9 +529,12 @@ def _parse_due(text: str) -> str | None:
 
 
 async def _send(telegram_id: int, text: str, reply_markup=None) -> None:
+    from abay_assistant.config import get_settings
+    s = get_settings()
+    target = s.telegram_group_id or telegram_id
     try:
         await _bot.send_message(
-            telegram_id, text, parse_mode=ParseMode.HTML, reply_markup=reply_markup
+            target, text, parse_mode=ParseMode.HTML, reply_markup=reply_markup
         )
     except Exception as e:
-        logger.error("Ошибка отправки {}: {}", telegram_id, e)
+        logger.error("Ошибка отправки {}: {}", target, e)

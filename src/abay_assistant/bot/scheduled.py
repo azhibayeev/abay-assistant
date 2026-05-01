@@ -53,6 +53,12 @@ def setup(
     _obsidian = obsidian
 
 
+def _target_chat() -> int:
+    """Вернуть ID чата для проактивных сообщений: группа (если настроена) или owner DM."""
+    s = get_settings()
+    return s.telegram_group_id or s.telegram_owner_id
+
+
 def _recipient_ids() -> list[int]:
     """Telegram ID пользователей для рассылки."""
     s = get_settings()
@@ -63,12 +69,15 @@ def _recipient_ids() -> list[int]:
 
 
 async def _send_to_all(text: str) -> None:
-    """Отправить сообщение всем пользователям с retry при 429."""
+    """Отправить сообщение в группу (если настроена) или всем пользователям с retry при 429."""
     from abay_assistant.bot.handlers import _md_to_html
     from aiogram.enums import ParseMode
 
     html = _md_to_html(text)
-    for tid in _recipient_ids():
+    s = get_settings()
+    targets = [s.telegram_group_id] if s.telegram_group_id else _recipient_ids()
+
+    for tid in targets:
         for attempt in range(3):
             try:
                 await _bot.send_message(tid, html, parse_mode=ParseMode.HTML)
@@ -278,11 +287,11 @@ async def noon_checkin() -> None:
 
             text += "Что-то поменялось в планах?"
 
-        s = get_settings()
+        chat_id = _target_chat()
         try:
-            await _bot.send_message(s.telegram_owner_id, text, parse_mode=ParseMode.HTML)
+            await _bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
         except Exception:
-            await _bot.send_message(s.telegram_owner_id, text)
+            await _bot.send_message(chat_id, text)
         logger.info("Полуденный чек-ин отправлен")
 
     except Exception as e:
@@ -309,6 +318,7 @@ async def evening_review() -> None:
         today_events = await _get_today_events()
 
         s = get_settings()
+        # Сессия привязана к owner_id, но сообщения пойдут в группу (если настроена)
         await start_session(s.telegram_owner_id, today_cards, today_events)
         logger.info("Вечерний свод запущен")
 
@@ -541,7 +551,7 @@ async def _get_crm_followups(days_threshold: int = 14) -> list[dict]:
 async def meeting_prep() -> None:
     """Проверить календарь: если через ~30 минут встреча с человеком из CRM — отправить контекст."""
     try:
-        s = get_settings()
+        chat_id = _target_chat()
         now = datetime.now()
 
         events = await _calendar.get_events(date=now)
@@ -576,7 +586,7 @@ async def meeting_prep() -> None:
             time_str = event_start_naive.strftime("%H:%M")
             message = f"Через ~30 мин ({time_str}): {summary}\n\nКонтекст из CRM:\n{crm_text}"
 
-            await _bot.send_message(s.telegram_owner_id, message)
+            await _bot.send_message(chat_id, message)
             _notified_meetings.add(dedup_key)
             logger.info("Meeting prep: {} (CRM: {})", summary, matched_name)
 
@@ -597,7 +607,7 @@ async def forgotten_contacts() -> None:
     """Еженедельный скан: контакты без обновления >21 дня."""
     logger.info("Запуск forgotten_contacts")
     try:
-        s = get_settings()
+        chat_id = _target_chat()
         people = await _obsidian.list_entities("person")
         stale = _filter_forgotten_contacts(people)
 
@@ -612,7 +622,7 @@ async def forgotten_contacts() -> None:
             lines.append(f"  — {p['name']} ({p['role']}) — {days_label}")
         lines.append("\nОткрой /who <имя> чтобы добавить обновление.")
 
-        await _bot.send_message(s.telegram_owner_id, "\n".join(lines))
+        await _bot.send_message(chat_id, "\n".join(lines))
         logger.info("forgotten_contacts: {} контактов", len(stale))
 
     except Exception as e:
@@ -627,7 +637,7 @@ async def stuck_tasks() -> None:
     """Ежедневный скан: карточки без активности >3 дней — интерактивно."""
     logger.info("Запуск stuck_tasks")
     try:
-        s = get_settings()
+        chat_id = _target_chat()
 
         today_raw = await _trello.get_cards(TrelloList.TODAY)
         stuck = _find_stuck_cards(today_raw, stale_days=3)
@@ -637,7 +647,7 @@ async def stuck_tasks() -> None:
             return
 
         await _bot.send_message(
-            s.telegram_owner_id,
+            chat_id,
             f"Застряли в «Сегодня» без активности >3 дней ({len(stuck)}):",
         )
 
@@ -651,7 +661,7 @@ async def stuck_tasks() -> None:
                 InlineKeyboardButton(text="🗑 Архив", callback_data=f"stuck_archive_{card_id}"),
             ]])
             await _bot.send_message(
-                s.telegram_owner_id,
+                chat_id,
                 f"{emoji} <b>{c['name']}</b> — {days} дн. без активности",
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb,
@@ -671,7 +681,7 @@ async def card_nudge() -> None:
     """Выбрать 2-3 карточки из «Сегодня» и спросить статус по каждой с кнопками."""
     logger.info("Запуск card_nudge")
     try:
-        s = get_settings()
+        chat_id = _target_chat()
         cards = await _trello.get_cards(TrelloList.TODAY)
         if not cards:
             return
@@ -701,7 +711,7 @@ async def card_nudge() -> None:
         greeting = "Полдня позади." if hour < 14 else "День идёт к концу."
 
         await _bot.send_message(
-            s.telegram_owner_id,
+            chat_id,
             f"{greeting} Пройдёмся по задачам ({len(cards)} в «Сегодня»):",
         )
 
@@ -715,7 +725,7 @@ async def card_nudge() -> None:
                 InlineKeyboardButton(text="⏭ Перенести", callback_data=f"nudge_postpone_{card_id}"),
             ]])
             await _bot.send_message(
-                s.telegram_owner_id,
+                chat_id,
                 f"{emoji} <b>{c['name']}</b>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb,
@@ -787,7 +797,7 @@ async def waiting_ping() -> None:
     """Карточки из «Мяч на стороне» без активности >5 дней — интерактивный пинг."""
     logger.info("Запуск waiting_ping")
     try:
-        s = get_settings()
+        chat_id = _target_chat()
         cards = await _trello.get_cards(TrelloList.WAITING)
         if not cards:
             return
@@ -798,7 +808,7 @@ async def waiting_ping() -> None:
             return
 
         await _bot.send_message(
-            s.telegram_owner_id,
+            chat_id,
             f"🤝 «Мяч на стороне» — {len(stale)} карточек без движения >5 дней:",
         )
 
@@ -811,7 +821,7 @@ async def waiting_ping() -> None:
                 InlineKeyboardButton(text="🗑 Архив", callback_data=f"wait_archive_{card_id}"),
             ]])
             await _bot.send_message(
-                s.telegram_owner_id,
+                chat_id,
                 f"<b>{c['name']}</b> — {days} дн.",
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb,
