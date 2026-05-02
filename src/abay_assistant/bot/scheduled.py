@@ -4,6 +4,7 @@ import asyncio
 import calendar as cal_mod
 import json
 import re
+import tarfile
 from collections import defaultdict
 from datetime import date as date_type, datetime, timedelta
 from pathlib import Path
@@ -714,12 +715,45 @@ async def meeting_prep() -> None:
                 continue
 
             time_str = event_start.strftime("%H:%M")
-            msg = f"⏰ Через ~30 мин ({time_str}): {summary}"
+            msg = f"⏰ через ~30 мин ({time_str}): {summary}"
 
             matched_name = _match_event_to_crm(summary, people)
             if matched_name:
                 crm_text = await _obsidian.get_entity_summary("person", matched_name)
-                msg += f"\n\nКонтекст из CRM:\n{crm_text}"
+                msg += f"\n\nконтекст по {matched_name}:\n{crm_text}"
+
+                # Добавить связанные проекты + последнее решение
+                meta = await _obsidian.get_entity_meta("person", matched_name)
+                projects = meta.get("projects", [])
+                if projects:
+                    msg += f"\n\nпроекты: {', '.join(str(p) for p in projects)}"
+                    # Последнее решение по первому связанному проекту
+                    try:
+                        proj_meta = await _obsidian.get_entity_meta("project", projects[0])
+                        decisions = proj_meta.get("decision_log", [])
+                        if decisions:
+                            msg += f"\nпоследнее решение по «{projects[0]}»: {decisions[-1]}"
+                    except Exception:
+                        pass
+
+            # Найти связанные Trello-карточки (поиск по имени человека)
+            try:
+                all_cards = await _trello.get_all_cards()
+                related = []
+                lists = await _trello.get_lists()
+                list_names = {v: k for k, v in lists.items()}
+                for c in all_cards:
+                    cname = c.get("name", "").lower()
+                    if matched_name and matched_name.lower() in cname:
+                        list_name = list_names.get(c.get("idList"), "")
+                        if list_name.lower() not in ("готово", "архив"):
+                            related.append((c["name"], list_name))
+                if related:
+                    msg += "\n\nоткрытые задачи:"
+                    for name, lst in related[:3]:
+                        msg += f"\n  — {name[:50]} ({lst})"
+            except Exception as e:
+                logger.debug("Ошибка поиска связанных карточек: {}", e)
 
             await _bot.send_message(chat_id, msg)
             _notified_meetings.add(dedup_key)
@@ -1294,3 +1328,142 @@ async def update_list_names() -> None:
 
     except Exception as e:
         logger.error("Ошибка update_list_names: {}", e)
+
+
+# ─────────────────────────────────────────────
+# Каждый день 4:00 — Snapshot CRM (Obsidian vault)
+# ─────────────────────────────────────────────
+
+async def crm_snapshot() -> None:
+    """Создать tar.gz снапшот vault. Хранит 30 дней. Можно откатиться вручную."""
+    logger.info("Запуск crm_snapshot")
+    try:
+        s = get_settings()
+        vault = Path(s.vault_path)
+        if not vault.exists():
+            logger.warning("crm_snapshot: vault не найден: {}", vault)
+            return
+
+        snapshots_dir = vault.parent / "vault_snapshots"
+        snapshots_dir.mkdir(exist_ok=True)
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        archive_path = snapshots_dir / f"vault_{today_str}.tar.gz"
+
+        # Создать архив
+        with tarfile.open(archive_path, "w:gz") as tar:
+            tar.add(vault, arcname=vault.name)
+
+        size_kb = archive_path.stat().st_size // 1024
+        logger.info("CRM snapshot: {} ({} KB)", archive_path.name, size_kb)
+
+        # Удалить старые (>30 дней)
+        cutoff = datetime.now() - timedelta(days=30)
+        deleted = 0
+        for f in snapshots_dir.glob("vault_*.tar.gz"):
+            try:
+                mtime = datetime.fromtimestamp(f.stat().st_mtime)
+                if mtime < cutoff:
+                    f.unlink()
+                    deleted += 1
+            except Exception as e:
+                logger.error("Ошибка удаления старого snapshot {}: {}", f.name, e)
+        if deleted:
+            logger.info("CRM snapshot: удалено {} старых архивов", deleted)
+
+    except Exception as e:
+        logger.error("Ошибка crm_snapshot: {}", e)
+
+
+# ─────────────────────────────────────────────
+# Каждый день 9:30 — Pattern detection
+# ─────────────────────────────────────────────
+
+async def pattern_check() -> None:
+    """Найти паттерны на доске и в CRM, сообщить о важных."""
+    logger.info("Запуск pattern_check")
+    try:
+        cards = await _trello.get_all_cards()
+        lists = await _trello.get_lists()
+        list_names = {v: k for k, v in lists.items()}
+
+        # Паттерн 1: один человек упоминается в 3+ активных карточках с дедлайном или мяч на стороне
+        person_cards: dict[str, list[dict]] = defaultdict(list)
+        active_lists = ["сегодня", "неделя", "Мяч на стороне"]
+        for card in cards:
+            list_name = list_names.get(card.get("idList"), "").lower()
+            if not any(al.lower() in list_name for al in active_lists):
+                continue
+            # Извлечь имена через тире (например, "Звонок — Расул")
+            name = card.get("name", "")
+            m = re.search(r"—\s*(\w[\wа-яА-ЯёЁ]+)\s*$", name)
+            if m:
+                person_cards[m.group(1)].append(card)
+
+        people_alerts = []
+        for person, plist in person_cards.items():
+            if len(plist) >= 3:
+                people_alerts.append((person, plist))
+
+        # Паттерн 2: карточки в "Мяч на стороне" >7 дней без активности
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        stale = []
+        for card in cards:
+            list_name = list_names.get(card.get("idList"), "").lower()
+            if "мяч" not in list_name:
+                continue
+            last_activity = card.get("dateLastActivity", "")
+            if last_activity:
+                try:
+                    last = datetime.fromisoformat(last_activity.replace("Z", "+00:00"))
+                    days = (now - last).days
+                    if days >= 7:
+                        stale.append((card, days))
+                except (ValueError, TypeError):
+                    pass
+
+        # Паттерн 3: просрочки > 3 дней
+        overdue = []
+        for card in cards:
+            due = card.get("due")
+            if not due:
+                continue
+            try:
+                due_dt = datetime.fromisoformat(due.replace("Z", "+00:00"))
+                days_late = (now - due_dt).days
+                if days_late >= 3:
+                    overdue.append((card, days_late))
+            except (ValueError, TypeError):
+                pass
+
+        # Если ничего не нашли — молчим
+        if not (people_alerts or stale or overdue):
+            logger.info("pattern_check: ничего интересного")
+            return
+
+        lines = []
+        if people_alerts:
+            lines.append("📌 паттерны по людям:")
+            for person, plist in people_alerts[:3]:
+                titles = ", ".join(f'«{c["name"][:40]}»' for c in plist[:3])
+                lines.append(f"  — {person}: {len(plist)} активных задач ({titles})")
+
+        if stale:
+            stale.sort(key=lambda x: x[1], reverse=True)
+            lines.append("\n⏳ висят на стороне >7 дней:")
+            for card, days in stale[:5]:
+                lines.append(f"  — {card['name'][:50]} ({days} дн.)")
+
+        if overdue:
+            overdue.sort(key=lambda x: x[1], reverse=True)
+            lines.append("\n🔴 просрочены >3 дней:")
+            for card, days in overdue[:5]:
+                lines.append(f"  — {card['name'][:50]} ({days} дн.)")
+
+        await _send_to_all("\n".join(lines))
+        logger.info("pattern_check: отправлено {} паттернов",
+                     len(people_alerts) + len(stale) + len(overdue))
+
+    except Exception as e:
+        logger.error("Ошибка pattern_check: {}", e)

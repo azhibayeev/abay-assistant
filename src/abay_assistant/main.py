@@ -32,6 +32,8 @@ from abay_assistant.bot.scheduled import (
     board_cleanup,
     weekly_carryover,
     daily_summary_for_assistant,
+    crm_snapshot,
+    pattern_check,
 )
 from abay_assistant.services.llm import LLMClient
 from abay_assistant.services.trello import TrelloClient
@@ -85,6 +87,10 @@ def setup_scheduler(scheduler: AsyncIOScheduler) -> None:
     scheduler.add_job(sort_cards_by_due, "cron", hour=8, minute=30)
     # Каждый день 8:50 — автоматическая чистка доски (дубли + обложки)
     scheduler.add_job(board_cleanup, "cron", hour=8, minute=50)
+    # Каждый день 4:00 — snapshot CRM (резервная копия vault, хранит 30 дней)
+    scheduler.add_job(crm_snapshot, "cron", hour=4, minute=0)
+    # Каждый день 9:30 — pattern detection (после утренней сводки)
+    scheduler.add_job(pattern_check, "cron", hour=9, minute=30)
     logger.info(
         "Расписание: 8:30 sort, 8:50 cleanup, 9:00 утро, 11:00 waiting-ping, "
         "16:00 nudge, 20:00 stuck, 21:00 summary, 22:30 вечер, "
