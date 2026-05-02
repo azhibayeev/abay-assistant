@@ -92,8 +92,9 @@ def setup_scheduler(scheduler: AsyncIOScheduler) -> None:
     # Каждый день 9:30 — pattern detection (после утренней сводки)
     scheduler.add_job(pattern_check, "cron", hour=9, minute=30)
     logger.info(
-        "Расписание: 8:30 sort, 8:50 cleanup, 9:00 утро, 11:00 waiting-ping, "
-        "16:00 nudge, 20:00 stuck, 21:00 summary, 22:30 вечер, "
+        "Расписание: 4:00 snapshot, 8:30 sort, 8:50 cleanup, 9:00 утро, "
+        "9:30 patterns, 11:00 waiting-ping, 16:00 nudge, 20:00 stuck, "
+        "21:00 summary, 22:30 вечер, "
         "пн 0:10 list-names, пн 0:15 carryover, "
         "вс 20:00 контакты, вс 21:00 weekly, meeting_prep/5мин, напоминания/60с (Asia/Almaty)"
     )
