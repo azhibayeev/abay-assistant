@@ -13,6 +13,7 @@ from abay_assistant.config import get_settings
 from abay_assistant.db import init_db
 from abay_assistant.bot.handlers import router, setup as setup_handlers
 from abay_assistant.bot.evening import setup as setup_evening, evening_router
+from abay_assistant.bot.evening_voice import setup as setup_evening_voice, evening_voice_router
 from abay_assistant.bot.crm_browser import crm_router, setup_crm
 from abay_assistant.bot.scheduled import (
     setup as setup_scheduled,
@@ -118,6 +119,10 @@ async def main() -> None:
     setup_handlers(llm=llm, trello=trello, obsidian=obsidian, whisper=whisper, calendar=calendar)
     setup_scheduled(bot=bot, llm=llm, trello=trello, calendar=calendar, obsidian=obsidian)
     setup_evening(bot=bot, trello=trello, obsidian=obsidian)
+    # ToolExecutor для evening_voice — отдельный инстанс, чтобы не зависеть от инициализации handlers
+    from abay_assistant.tools.executor import ToolExecutor
+    voice_executor = ToolExecutor(trello=trello, obsidian=obsidian, calendar=calendar)
+    setup_evening_voice(bot=bot, llm=llm, trello=trello, executor=voice_executor)
     setup_crm(bot=bot, obsidian=obsidian)
     logger.info("Сервисы инициализированы (LLM, Trello, Obsidian, Whisper, Calendar, CRM)")
 
@@ -128,6 +133,7 @@ async def main() -> None:
 
     dp = Dispatcher()
     dp.include_router(evening_router)
+    dp.include_router(evening_voice_router)
     dp.include_router(nudge_router)
     dp.include_router(crm_router)
     dp.include_router(router)

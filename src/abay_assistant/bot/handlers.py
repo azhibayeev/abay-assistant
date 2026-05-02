@@ -21,6 +21,12 @@ from abay_assistant.services.obsidian import ObsidianClient
 from abay_assistant.services.whisper import WhisperClient
 from abay_assistant.services.calendar import CalendarClient
 from abay_assistant.bot.evening import has_active_session, handle_response as evening_handle, start_session, cancel_session
+from abay_assistant.bot.evening_voice import (
+    has_active_session as voice_has_active_session,
+    is_collecting as voice_is_collecting,
+    is_awaiting_confirmation as voice_is_awaiting,
+    append_voice as voice_append,
+)
 from abay_assistant.bot.crm_browser import (
     has_pending_note,
     cancel_pending_note,
@@ -722,6 +728,20 @@ async def handle_voice(message: TgMessage, bot: Bot) -> None:
 
     if not text:
         await message.answer("Не удалось распознать речь.")
+        return
+
+    # Если идёт сессия вечернего свода и это голос Абая — копим, не пускаем в LLM.
+    # Эхо-подтверждение придёт через 5 минут после последнего голоса.
+    if voice_has_active_session(message.from_user.id) and (
+        voice_is_collecting(message.from_user.id)
+        or voice_is_awaiting(message.from_user.id)
+    ):
+        await voice_append(message.from_user.id, text)
+        try:
+            from aiogram.types import ReactionTypeEmoji
+            await message.react([ReactionTypeEmoji(emoji="👌")])
+        except Exception:
+            pass
         return
 
     # Показать распознанный текст и обработать через inbox

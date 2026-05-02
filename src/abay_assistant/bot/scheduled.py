@@ -158,10 +158,11 @@ async def check_reminders() -> None:
 # ─────────────────────────────────────────────
 
 async def cleanup_sessions() -> None:
-    """Очистить просроченные вечерние сессии."""
+    """Очистить просроченные сессии (старый интерактив + голосовой буфер)."""
     try:
         from abay_assistant.bot.evening import cleanup_expired_sessions
-        removed = cleanup_expired_sessions()
+        from abay_assistant.bot.evening_voice import cleanup_expired as cleanup_voice_expired
+        removed = cleanup_expired_sessions() + cleanup_voice_expired()
         if removed:
             logger.info("Очищено {} просроченных сессий", removed)
     except Exception as e:
@@ -461,31 +462,94 @@ async def noon_checkin() -> None:
 
 
 # ─────────────────────────────────────────────
-# 22:30 — Вечерний свод
+# 22:30 — Вечерний свод в группе (для Абая)
 # ─────────────────────────────────────────────
 
 async def evening_review() -> None:
-    """Запустить пошаговый вечерний свод."""
-    logger.info("Запуск вечернего свода")
+    """Вечерний свод: список задач + расписание + вопрос Абаю в группу.
 
-    from abay_assistant.bot.evening import start_session
+    1. Сначала перетасует карточки по дедлайнам (на случай если кто-то с дедом сегодня
+       завис в Неделе/месяце).
+    2. Соберёт «Сегодня» + сегодняшние события календаря.
+    3. Отправит в группу с упоминанием Абая (на «Вы»).
+    4. Запустит сессию сбора голосовых: через 5 мин после последнего голоса от Абая —
+       эхо-подтверждение, после «Да» — LLM создаст/перенесёт карточки.
+    """
+    logger.info("Запуск вечернего свода (группа)")
+
+    from abay_assistant.bot.evening_voice import start_session as start_voice_session
 
     try:
-        # Получить карточки с ID (нужны для архивации)
+        # 1. Освежить «Сегодня» — подтянуть карточки из «Недели»/месяцев с due на сегодня
+        await sort_cards_by_due()
+
+        # 2. Собрать данные
         raw_cards = await _trello.get_cards(TrelloList.TODAY)
-        today_cards = [
-            {"id": c["id"], "name": c["name"]}
-            for c in raw_cards
-        ]
+        today_cards = [{"id": c["id"], "name": c["name"]} for c in raw_cards]
         today_events = await _get_today_events()
 
+        # 3. Сформировать сообщение
         s = get_settings()
-        # Сессия привязана к owner_id, но сообщения пойдут в группу (если настроена)
-        await start_session(s.telegram_owner_id, today_cards, today_events)
-        logger.info("Вечерний свод запущен")
+        mention = _mention_assistant()
+        text = _format_evening_group_message(raw_cards, today_events, mention)
+
+        chat_id = s.telegram_group_id or s.telegram_owner_id
+        await _bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+
+        # 4. Запустить сессию сбора голосовых — реагирует только на Абая
+        if s.telegram_assistant_id:
+            start_voice_session(s.telegram_assistant_id, today_cards, today_events)
+
+        logger.info("Вечерний свод (группа) отправлен, сессия голосовых открыта")
 
     except Exception as e:
         logger.error("Ошибка вечернего свода: {}", e)
+
+
+def _mention_assistant() -> str:
+    """Упоминание Абая через @username или tg://user link."""
+    s = get_settings()
+    if s.telegram_assistant_username:
+        return f"@{s.telegram_assistant_username}"
+    if s.telegram_assistant_id:
+        return f'<a href="tg://user?id={s.telegram_assistant_id}">Абай</a>'
+    return "Абай"
+
+
+def _format_evening_group_message(cards: list[dict], events: list[dict], mention: str) -> str:
+    """Собрать вечернее сообщение для группы."""
+    today = datetime.now().strftime("%d.%m.%Y, %A")
+
+    lines = [f"<b>Вечерний свод — {today}</b>", ""]
+
+    if cards:
+        lines.append(f"<b>Задачи на сегодня ({len(cards)}):</b>")
+        for c in cards:
+            lines.append(f"  {_cover_emoji(c)} {c['name']}")
+    else:
+        lines.append("<b>Задачи на сегодня:</b> пусто")
+    lines.append("")
+
+    if events:
+        lines.append(f"<b>Расписание ({len(events)}):</b>")
+        for e in events:
+            time_str = (e.get("start", "") or "")[11:16]
+            summary = e.get("summary", "(без названия)")
+            prefix = f"{time_str} — " if time_str else ""
+            lines.append(f"  • {prefix}{summary}")
+    else:
+        lines.append("<b>Расписание:</b> пусто")
+    lines.append("")
+
+    lines.append(
+        f"{mention}, что Вы сделали сегодня и какие новые задачи появились?\n"
+        f"Также откройте, пожалуйста, WhatsApp и посмотрите, с кем была переписка сегодня — "
+        f"что из этого нужно записать в задачи?\n\n"
+        f"Можно отвечать голосом, в несколько сообщений. "
+        f"Через 5 минут после последнего голосового я соберу всё вместе и переспрошу, правильно ли понял."
+    )
+
+    return "\n".join(lines)
 
 
 # ─────────────────────────────────────────────
