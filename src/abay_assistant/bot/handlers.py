@@ -913,7 +913,15 @@ async def _process_response(
                 tool_uses.append(block)
 
         if not tool_uses:
-            return "\n".join(text_parts)
+            text = "\n".join(text_parts)
+            # Защита: если модель вывела XML <invoke> как текст вместо tool_use
+            if "<invoke" in text or "<parameter" in text:
+                logger.error("LLM вывел сырой XML invoke как текст — инструменты не выполнены")
+                return (
+                    "Произошла ошибка: я попытался выполнить действия, но они не сработали. "
+                    "Повтори запрос ещё раз, пожалуйста."
+                )
+            return text
 
         # request_clarification — вернуть вопрос напрямую
         if len(tool_uses) == 1 and tool_uses[0].name == "request_clarification":
