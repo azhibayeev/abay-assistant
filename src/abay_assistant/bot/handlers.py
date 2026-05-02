@@ -879,6 +879,35 @@ _TOOL_DESCRIPTIONS = {
     "web_fetch": "Загрузка страницы",
 }
 
+# Видимые статусы действий: показывают пользователю что делает бот в реальном времени
+_TOOL_STATUS = {
+    "get_trello_cards": "🔍 смотрю «{list_name}»...",
+    "create_trello_card": "📌 создаю карточку «{name}»...",
+    "move_trello_card": "📦 переношу...",
+    "update_trello_card": "✏️ обновляю...",
+    "add_trello_comment": "💬 добавляю комментарий...",
+    "set_trello_card_cover": "🎨 ставлю цвет...",
+    "rename_trello_card": "✏️ переименовываю...",
+    "save_entity_note": "🧠 запоминаю: {entity_name}",
+    "update_entity_meta": "🧠 обновляю CRM: {entity_name}",
+    "set_reminder": "⏰ ставлю напоминание...",
+    "create_calendar_event": "📅 создаю событие в календаре...",
+    "web_search": "🔍 ищу в интернете: «{query}»",
+    "web_fetch": "📄 читаю страницу...",
+    "append_obsidian_daily": "📝 пишу в дневник...",
+}
+
+
+def _format_status(tool_name: str, tool_input: dict) -> str | None:
+    """Сформировать строку статуса для tool call. None — не показывать."""
+    template = _TOOL_STATUS.get(tool_name)
+    if not template:
+        return None
+    try:
+        return template.format(**tool_input)
+    except (KeyError, IndexError):
+        return None
+
 
 def _describe_tool_action(tool_name: str, tool_input: dict) -> str:
     """Человекочитаемое описание выполненного tool call."""
@@ -901,6 +930,18 @@ async def _process_response(
     current_messages = list(messages)
     current_resp = resp
     actions_done: list[str] = []  # Трекинг выполненных действий
+    status_msg_ids: list[int] = []  # ID отправленных статус-сообщений (удалим в конце)
+
+    async def _cleanup_statuses() -> None:
+        """Удалить статус-сообщения после завершения операции."""
+        if not message or not status_msg_ids:
+            return
+        for mid in status_msg_ids:
+            try:
+                await message.bot.delete_message(message.chat.id, mid)
+            except Exception:
+                pass
+        status_msg_ids.clear()
 
     for _round in range(MAX_TOOL_ROUNDS):
         text_parts = []
@@ -932,12 +973,33 @@ async def _process_response(
 
                     descs = await asyncio.gather(*[_run_inv(inv) for inv in xml_invokes])
                     actions_done.extend(d for d in descs if d)
+                    await _cleanup_statuses()
                     return _build_actions_summary(actions_done)
+            await _cleanup_statuses()
             return text
 
         # request_clarification — вернуть вопрос напрямую
         if len(tool_uses) == 1 and tool_uses[0].name == "request_clarification":
+            await _cleanup_statuses()
             return tool_uses[0].input.get("question", "Уточни, пожалуйста.")
+
+        # Показать статус — что бот сейчас делает
+        if message:
+            statuses = []
+            for tu in tool_uses:
+                s = _format_status(tu.name, tu.input)
+                if s and s not in statuses:
+                    statuses.append(s)
+            if statuses:
+                try:
+                    sent = await message.bot.send_message(
+                        message.chat.id,
+                        "\n".join(statuses[:5]),  # максимум 5 строк
+                        disable_notification=True,
+                    )
+                    status_msg_ids.append(sent.message_id)
+                except Exception as e:
+                    logger.debug("Не удалось отправить статус: {}", e)
 
         # Выполнить tool calls параллельно (в одном раунде они независимы)
         async def _run_tool(tu):
@@ -985,6 +1047,7 @@ async def _process_response(
             )
         except Exception as e:
             logger.error("LLM tool round {} ошибка: {}", _round + 1, e)
+            await _cleanup_statuses()
             return _build_actions_summary(actions_done)
 
     # Если все раунды израсходованы — собрать текст из последнего ответа
@@ -992,6 +1055,7 @@ async def _process_response(
     for block in current_resp.content:
         if block.type == "text":
             final_texts.append(block.text)
+    await _cleanup_statuses()
     return "\n".join(final_texts) if final_texts else _build_actions_summary(actions_done)
 
 
