@@ -914,13 +914,21 @@ async def _process_response(
 
         if not tool_uses:
             text = "\n".join(text_parts)
-            # Защита: если модель вывела XML <invoke> как текст вместо tool_use
-            if "<invoke" in text or "<parameter" in text:
-                logger.error("LLM вывел сырой XML invoke как текст — инструменты не выполнены")
-                return (
-                    "Произошла ошибка: я попытался выполнить действия, но они не сработали. "
-                    "Повтори запрос ещё раз, пожалуйста."
-                )
+            # Fallback: модель вывела XML <invoke> как текст вместо tool_use — выполним сами
+            if "<invoke" in text:
+                xml_invokes = _parse_invoke_xml(text)
+                if xml_invokes:
+                    logger.warning(
+                        "LLM вывел XML вместо tool_use — выполняю {} инструментов из текста",
+                        len(xml_invokes),
+                    )
+                    for inv in xml_invokes:
+                        try:
+                            await _executor.execute(inv["name"], inv["input"], context=context)
+                            actions_done.append(_describe_tool_action(inv["name"], inv["input"]))
+                        except Exception as e:
+                            logger.error("Ошибка выполнения {}: {}", inv["name"], e)
+                    return _build_actions_summary(actions_done)
             return text
 
         # request_clarification — вернуть вопрос напрямую
@@ -973,6 +981,30 @@ async def _process_response(
         if block.type == "text":
             final_texts.append(block.text)
     return "\n".join(final_texts) if final_texts else _build_actions_summary(actions_done)
+
+
+def _parse_invoke_xml(text: str) -> list[dict]:
+    """Распарсить сырые <invoke> XML-теги из текста (когда LLM не использует tool_use).
+
+    Возвращает [{name, input}] — список вызовов в порядке появления.
+    """
+    invocations = []
+    invoke_pattern = re.compile(
+        r'<invoke\s+name="([^"]+)"\s*>(.*?)</invoke>', re.DOTALL
+    )
+    param_pattern = re.compile(
+        r'<parameter\s+name="([^"]+)"\s*>(.*?)</parameter>', re.DOTALL
+    )
+    for m in invoke_pattern.finditer(text):
+        name = m.group(1)
+        body = m.group(2)
+        inputs: dict = {}
+        for pm in param_pattern.finditer(body):
+            key = pm.group(1)
+            val = pm.group(2).strip()
+            inputs[key] = val
+        invocations.append({"name": name, "input": inputs})
+    return invocations
 
 
 def _serialize_content(content_blocks) -> list[dict]:
