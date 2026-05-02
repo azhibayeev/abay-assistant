@@ -95,6 +95,39 @@ async def _send_to_all(text: str) -> None:
                     break
 
 
+async def _send_dm(target_id: int, text: str, reply_markup=None) -> None:
+    """Отправить личное сообщение конкретному пользователю (с markdown→html)."""
+    from abay_assistant.bot.handlers import _md_to_html
+    from aiogram.enums import ParseMode
+
+    if not target_id:
+        return
+    html = _md_to_html(text)
+    try:
+        await _bot.send_message(target_id, html, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    except Exception as e:
+        logger.error("Не удалось отправить DM {}: {}", target_id, e)
+
+
+async def _send_to_assistant(text: str, reply_markup=None) -> None:
+    """Отправить личное сообщение Алану (ассистенту). Если ID не настроен — owner."""
+    s = get_settings()
+    target = s.telegram_assistant_id or s.telegram_owner_id
+    await _send_dm(target, text, reply_markup=reply_markup)
+
+
+async def _send_dm_both(text: str) -> None:
+    """Отправить личные сообщения и Алану, и Абаю (НЕ в группу)."""
+    s = get_settings()
+    targets = []
+    if s.telegram_assistant_id:
+        targets.append(s.telegram_assistant_id)
+    if s.telegram_owner_id and s.telegram_owner_id not in targets:
+        targets.append(s.telegram_owner_id)
+    for tid in targets:
+        await _send_dm(tid, text)
+
+
 # ─────────────────────────────────────────────
 # Каждые 60 сек — Напоминания
 # ─────────────────────────────────────────────
@@ -250,13 +283,10 @@ async def board_cleanup() -> None:
                     logger.error("Ошибка назначения обложки '{}': {}", card["name"], e)
 
         if actions:
-            chat_id = _target_chat()
-            summary = "🧹 <b>Автоматическая чистка доски:</b>\n" + "\n".join(f"• {a}" for a in actions)
-            try:
-                await _bot.send_message(chat_id, summary, parse_mode=ParseMode.HTML)
-            except Exception:
-                await _bot.send_message(chat_id, summary.replace("<b>", "").replace("</b>", ""))
-            logger.info("board_cleanup: {} действий", len(actions))
+            # В личку Алану — техническая чистка, не для группы
+            summary = "🧹 авто-чистка доски:\n" + "\n".join(f"• {a}" for a in actions)
+            await _send_to_assistant(summary)
+            logger.info("board_cleanup: {} действий, отправлено ассистенту", len(actions))
         else:
             logger.info("board_cleanup: доска чистая")
 
@@ -312,8 +342,9 @@ async def morning_briefing() -> None:
             max_tokens=2048,
         )
 
-        await _send_to_all(text)
-        logger.info("Утренняя сводка отправлена")
+        # В личку Алану — это его рабочий инструмент. Алан сам решит что важного сказать в группу.
+        await _send_to_assistant(text)
+        logger.info("Утренняя сводка отправлена ассистенту в личку")
 
     except Exception as e:
         logger.error("Ошибка утренней сводки: {}", e)
@@ -715,47 +746,51 @@ async def meeting_prep() -> None:
                 continue
 
             time_str = event_start.strftime("%H:%M")
-            msg = f"⏰ через ~30 мин ({time_str}): {summary}"
-
             matched_name = _match_event_to_crm(summary, people)
-            if matched_name:
-                crm_text = await _obsidian.get_entity_summary("person", matched_name)
-                msg += f"\n\nконтекст по {matched_name}:\n{crm_text}"
 
-                # Добавить связанные проекты + последнее решение
+            # КОРОТКОЕ сообщение в группу — все участники должны знать
+            short_msg = f"⏰ через 30 мин ({time_str}): {summary}"
+            await _bot.send_message(chat_id, short_msg)
+
+            # ДЕТАЛЬНЫЙ контекст — в личку Алану (он подготовится)
+            if matched_name:
+                detail = f"⏰ через 30 мин: {summary}\n\nконтекст по {matched_name}:\n"
+                crm_text = await _obsidian.get_entity_summary("person", matched_name)
+                detail += crm_text
+
                 meta = await _obsidian.get_entity_meta("person", matched_name)
                 projects = meta.get("projects", [])
                 if projects:
-                    msg += f"\n\nпроекты: {', '.join(str(p) for p in projects)}"
-                    # Последнее решение по первому связанному проекту
+                    detail += f"\n\nпроекты: {', '.join(str(p) for p in projects)}"
                     try:
                         proj_meta = await _obsidian.get_entity_meta("project", projects[0])
                         decisions = proj_meta.get("decision_log", [])
                         if decisions:
-                            msg += f"\nпоследнее решение по «{projects[0]}»: {decisions[-1]}"
+                            detail += f"\nпоследнее решение по «{projects[0]}»: {decisions[-1]}"
                     except Exception:
                         pass
 
-            # Найти связанные Trello-карточки (поиск по имени человека)
-            try:
-                all_cards = await _trello.get_all_cards()
-                related = []
-                lists = await _trello.get_lists()
-                list_names = {v: k for k, v in lists.items()}
-                for c in all_cards:
-                    cname = c.get("name", "").lower()
-                    if matched_name and matched_name.lower() in cname:
-                        list_name = list_names.get(c.get("idList"), "")
-                        if list_name.lower() not in ("готово", "архив"):
-                            related.append((c["name"], list_name))
-                if related:
-                    msg += "\n\nоткрытые задачи:"
-                    for name, lst in related[:3]:
-                        msg += f"\n  — {name[:50]} ({lst})"
-            except Exception as e:
-                logger.debug("Ошибка поиска связанных карточек: {}", e)
+                # Связанные Trello-карточки
+                try:
+                    all_cards = await _trello.get_all_cards()
+                    lists = await _trello.get_lists()
+                    list_names = {v: k for k, v in lists.items()}
+                    related = []
+                    for c in all_cards:
+                        cname = c.get("name", "").lower()
+                        if matched_name.lower() in cname:
+                            ln = list_names.get(c.get("idList"), "")
+                            if ln.lower() not in ("готово", "архив"):
+                                related.append((c["name"], ln))
+                    if related:
+                        detail += "\n\nоткрытые задачи:"
+                        for name, lst in related[:3]:
+                            detail += f"\n  — {name[:50]} ({lst})"
+                except Exception as e:
+                    logger.debug("Ошибка поиска карточек: {}", e)
 
-            await _bot.send_message(chat_id, msg)
+                await _send_to_assistant(detail)
+
             _notified_meetings.add(dedup_key)
             logger.info("Meeting reminder: {} (CRM: {})", summary, matched_name or "—")
 
@@ -795,17 +830,11 @@ async def weekly_carryover() -> None:
                 logger.error("Ошибка carryover '{}': {}", card["name"], e)
 
         if commented:
-            lines = [f"📅 <b>Перенесено с прошлой недели ({len(commented)}):</b>\n"]
+            lines = [f"📅 перенесено с прошлой недели ({len(commented)}):\n"]
             for name in commented:
                 lines.append(f"— {name}")
-            lines.append("\nЭти карточки остались в колонке «Неделя».")
-
-            chat_id = _target_chat()
-            text = "\n".join(lines)
-            try:
-                await _bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
-            except Exception:
-                await _bot.send_message(chat_id, text.replace("<b>", "").replace("</b>", ""))
+            # В личку Алану — операционная инфа на старт недели
+            await _send_to_assistant("\n".join(lines))
 
         logger.info("weekly_carryover: {} карточек помечено", len(commented))
 
@@ -821,7 +850,9 @@ async def forgotten_contacts() -> None:
     """Еженедельный скан: контакты без обновления >21 дня."""
     logger.info("Запуск forgotten_contacts")
     try:
-        chat_id = _target_chat()
+        # В личку Алану — он восстанавливает контакты
+        s = get_settings()
+        chat_id = s.telegram_assistant_id or s.telegram_owner_id
         people = await _obsidian.list_entities("person")
         stale = _filter_forgotten_contacts(people)
 
@@ -894,11 +925,11 @@ async def daily_summary_for_assistant() -> None:
             max_tokens=1024,
         )
 
-        # Отправить в группу (или всем)
+        # В личку обоим (Алан + Абай) — личная сводка, не для группы
         header = f"📋 **Сводка дня ({today_str}):**\n\n"
-        await _send_to_all(header + summary)
+        await _send_dm_both(header + summary)
 
-        logger.info("daily_summary отправлен")
+        logger.info("daily_summary отправлен в личку")
 
     except Exception as e:
         logger.error("Ошибка daily_summary_for_assistant: {}", e)
@@ -912,7 +943,9 @@ async def stuck_tasks() -> None:
     """Ежедневный скан: карточки без активности >3 дней — интерактивно."""
     logger.info("Запуск stuck_tasks")
     try:
-        chat_id = _target_chat()
+        # В личку Алану — это его рабочий инструмент
+        s = get_settings()
+        chat_id = s.telegram_assistant_id or s.telegram_owner_id
 
         today_raw = await _trello.get_cards(TrelloList.TODAY)
         stuck = _find_stuck_cards(today_raw, stale_days=3)
@@ -956,7 +989,9 @@ async def card_nudge() -> None:
     """Выбрать 2-3 карточки из «Сегодня» и спросить статус по каждой с кнопками."""
     logger.info("Запуск card_nudge")
     try:
-        chat_id = _target_chat()
+        # В личку Алану — он отвечает за статусы
+        s = get_settings()
+        chat_id = s.telegram_assistant_id or s.telegram_owner_id
         cards = await _trello.get_cards(TrelloList.TODAY)
         if not cards:
             return
@@ -1097,7 +1132,9 @@ async def waiting_ping() -> None:
     """Карточки из «Мяч на стороне» без активности >5 дней — интерактивный пинг."""
     logger.info("Запуск waiting_ping")
     try:
-        chat_id = _target_chat()
+        # В личку Алану — он пинает по контактам
+        s = get_settings()
+        chat_id = s.telegram_assistant_id or s.telegram_owner_id
         cards = await _trello.get_cards(TrelloList.WAITING)
         if not cards:
             return
@@ -1461,8 +1498,9 @@ async def pattern_check() -> None:
             for card, days in overdue[:5]:
                 lines.append(f"  — {card['name'][:50]} ({days} дн.)")
 
-        await _send_to_all("\n".join(lines))
-        logger.info("pattern_check: отправлено {} паттернов",
+        # В личку Алану — он триажит и решает что нести в группу
+        await _send_to_assistant("\n".join(lines))
+        logger.info("pattern_check: отправлено в личку ассистенту, {} паттернов",
                      len(people_alerts) + len(stale) + len(overdue))
 
     except Exception as e:
