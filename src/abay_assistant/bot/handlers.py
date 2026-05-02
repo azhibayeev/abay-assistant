@@ -13,7 +13,7 @@ from aiogram.types import Message as TgMessage
 from loguru import logger
 
 from abay_assistant.config import get_settings
-from abay_assistant.db import save_message, get_recent_messages, get_active_reminders, delete_reminder, get_tool_stats, get_message_stats, save_idea, get_ideas, update_idea_status
+from abay_assistant.db import save_message, get_recent_messages, get_active_reminders, delete_reminder, get_tool_stats, get_message_stats, save_idea, get_ideas, update_idea_status, clear_messages, delete_last_exchange, get_last_user_message
 from abay_assistant.enums import UserRole, TrelloList
 from abay_assistant.services.llm import LLMClient
 from abay_assistant.services.trello import TrelloClient
@@ -371,6 +371,47 @@ async def cmd_cancel(message: TgMessage) -> None:
         await message.answer("Вечерний свод отменён.")
     else:
         await message.answer("Нет активной сессии.")
+
+
+@router.message(F.text == "/new")
+async def cmd_new(message: TgMessage) -> None:
+    """Сбросить контекст разговора (бот забывает историю переписки)."""
+    role = await _check_access(message)
+    if not role:
+        return
+    tid = message.from_user.id
+    n = clear_messages(tid)
+    await message.answer(f"ок, начинаем с чистого листа. забыл {n} сообщ.")
+
+
+@router.message(F.text == "/undo")
+async def cmd_undo(message: TgMessage) -> None:
+    """Отменить последний обмен (последнее сообщение пользователя + ответ бота)."""
+    role = await _check_access(message)
+    if not role:
+        return
+    tid = message.from_user.id
+    n = delete_last_exchange(tid)
+    if n:
+        await message.answer(f"откатил последний обмен ({n} сообщ.). действия в Trello/CRM не отменяются автоматически — скажи если нужно вернуть.")
+    else:
+        await message.answer("нечего отменять.")
+
+
+@router.message(F.text == "/retry")
+async def cmd_retry(message: TgMessage) -> None:
+    """Повторить последний запрос."""
+    role = await _check_access(message)
+    if not role:
+        return
+    tid = message.from_user.id
+    last = get_last_user_message(tid)
+    if not last:
+        await message.answer("нет предыдущего запроса.")
+        return
+    # Удалить последнюю пару (пользователь + ответ) и повторить запрос
+    delete_last_exchange(tid)
+    await _process_inbox(message, role, last)
 
 
 @router.message(F.text == "/health")

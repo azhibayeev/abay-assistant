@@ -116,6 +116,51 @@ def get_recent_messages(telegram_id: int, limit: int = 5) -> list[Message]:
     return messages
 
 
+def clear_messages(telegram_id: int) -> int:
+    """Удалить ВСЕ сообщения пользователя (для /new). Возвращает количество удалённых."""
+    with get_session() as session:
+        stmt = select(Message).where(Message.telegram_id == telegram_id)
+        msgs = list(session.exec(stmt).all())
+        for m in msgs:
+            session.delete(m)
+        session.commit()
+        return len(msgs)
+
+
+def delete_last_exchange(telegram_id: int) -> int:
+    """Удалить последнюю user-assistant пару сообщений (для /undo)."""
+    with get_session() as session:
+        stmt = (
+            select(Message)
+            .where(Message.telegram_id == telegram_id)
+            .order_by(Message.created_at.desc())
+            .limit(10)
+        )
+        msgs = list(session.exec(stmt).all())
+        # Найти последнего user и удалить его + всё что после (assistant ответы)
+        deleted = 0
+        for m in msgs:
+            session.delete(m)
+            deleted += 1
+            if m.role == "user":
+                break
+        session.commit()
+        return deleted
+
+
+def get_last_user_message(telegram_id: int) -> str | None:
+    """Получить текст последнего user-сообщения (для /retry)."""
+    with get_session() as session:
+        stmt = (
+            select(Message)
+            .where(Message.telegram_id == telegram_id, Message.role == "user")
+            .order_by(Message.created_at.desc())
+            .limit(1)
+        )
+        msg = session.exec(stmt).first()
+    return msg.text if msg else None
+
+
 # ─────────────────────────────────────────
 # Reminders
 # ─────────────────────────────────────────

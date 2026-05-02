@@ -140,6 +140,9 @@ async def main() -> None:
     # Установить меню команд (перезаписывает старые)
     await bot.set_my_commands([
         BotCommand(command="board", description="Обзор доски Trello"),
+        BotCommand(command="new", description="Сбросить контекст разговора"),
+        BotCommand(command="undo", description="Отменить последний обмен"),
+        BotCommand(command="retry", description="Повторить последний запрос"),
         BotCommand(command="reminders", description="Активные напоминания"),
         BotCommand(command="evening", description="Вечерний свод"),
         BotCommand(command="stats", description="Статистика за 7 дней"),
