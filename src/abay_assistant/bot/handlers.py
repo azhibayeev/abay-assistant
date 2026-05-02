@@ -922,12 +922,16 @@ async def _process_response(
                         "LLM вывел XML вместо tool_use — выполняю {} инструментов из текста",
                         len(xml_invokes),
                     )
-                    for inv in xml_invokes:
+                    async def _run_inv(inv):
                         try:
                             await _executor.execute(inv["name"], inv["input"], context=context)
-                            actions_done.append(_describe_tool_action(inv["name"], inv["input"]))
+                            return _describe_tool_action(inv["name"], inv["input"])
                         except Exception as e:
                             logger.error("Ошибка выполнения {}: {}", inv["name"], e)
+                            return None
+
+                    descs = await asyncio.gather(*[_run_inv(inv) for inv in xml_invokes])
+                    actions_done.extend(d for d in descs if d)
                     return _build_actions_summary(actions_done)
             return text
 
@@ -935,10 +939,18 @@ async def _process_response(
         if len(tool_uses) == 1 and tool_uses[0].name == "request_clarification":
             return tool_uses[0].input.get("question", "Уточни, пожалуйста.")
 
-        # Выполнить tool calls
+        # Выполнить tool calls параллельно (в одном раунде они независимы)
+        async def _run_tool(tu):
+            try:
+                result = await _executor.execute(tu.name, tu.input, context=context)
+            except Exception as e:
+                logger.error("Tool {} ошибка: {}", tu.name, e)
+                result = f"Ошибка: {e}"
+            return tu, result
+
+        results = await asyncio.gather(*[_run_tool(tu) for tu in tool_uses])
         tool_results = []
-        for tu in tool_uses:
-            result = await _executor.execute(tu.name, tu.input, context=context)
+        for tu, result in results:
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": tu.id,
