@@ -1,15 +1,22 @@
 import asyncio
 import html as html_lib
+import json
 import re
 import tempfile
 import time
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from aiogram import Router, F, Bot
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import CommandStart
-from aiogram.types import Message as TgMessage
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    CallbackQuery,
+    Message as TgMessage,
+)
 from loguru import logger
 
 from abay_assistant.config import get_settings
@@ -48,9 +55,25 @@ _obsidian: ObsidianClient | None = None
 _calendar: CalendarClient | None = None
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "inbox.md"
+FORWARD_PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "forward.md"
 
 MAX_TOOL_ROUNDS = 8
 MAX_VOICE_SIZE = 20 * 1024 * 1024  # 20 MB
+
+# Forwarded-message подтверждения: fwd_id → план действий
+_pending_forwards: dict[str, dict] = {}
+_FORWARD_TTL = timedelta(hours=1)
+
+# Whitelist tools, которые LLM может предложить в forward-плане (защита от галлюцинированных имён)
+_FORWARD_ALLOWED_TOOLS: frozenset[str] = frozenset({
+    "create_trello_card", "update_trello_card", "add_trello_comment",
+    "move_trello_card", "set_trello_card_cover", "add_checklist_item",
+    "create_calendar_event", "set_reminder",
+    "save_entity_note", "update_entity_meta", "append_obsidian_daily",
+})
+
+# Лимит хвоста паттернов в системном промпте — защита от роста контекста на токенах
+_PATTERNS_TAIL_LINES = 30
 
 # CRM-кеш имён для авто-линковки
 _crm_names_cache: list[str] = []
@@ -60,6 +83,10 @@ _CRM_CACHE_TTL = 300  # 5 минут
 # CRM-контекст для system prompt
 _crm_context_cache: str = ""
 _crm_context_cache_ts: float = 0.0
+
+# Patterns-контекст для system prompt (привычки Алана/Абая)
+_patterns_cache: str = ""
+_patterns_cache_ts: float = 0.0
 
 
 def setup(
@@ -128,7 +155,38 @@ async def _build_system_prompt(role: str) -> str:
     if crm_context:
         prompt += "\n\n## Справочник CRM (люди и проекты)\n\n" + crm_context
 
+    # Подгрузить личные паттерны Алана и Абая
+    patterns_context = await _get_patterns_context()
+    if patterns_context:
+        prompt += "\n\n## Личные паттерны (учитывай при принятии решений)\n\n" + patterns_context
+
     return prompt
+
+
+async def _get_patterns_context() -> str:
+    """Собрать паттерны Алана и Абая для system prompt. Кеш 5 мин."""
+    global _patterns_cache, _patterns_cache_ts
+    now = time.monotonic()
+    if _patterns_cache and (now - _patterns_cache_ts) < _CRM_CACHE_TTL:
+        return _patterns_cache
+
+    try:
+        chunks = []
+        for person in ("Алан", "Абай"):
+            text = await _obsidian.read_personal_patterns(person)
+            text = text.strip()
+            if text:
+                # Берём только последние N строк-наблюдений — иначе системный промпт раздуется.
+                # Сам файл хранит полную историю; в промпт идёт хвост.
+                lines = [ln for ln in text.splitlines() if ln.strip().startswith("- ")]
+                tail = lines[-_PATTERNS_TAIL_LINES:] if len(lines) > _PATTERNS_TAIL_LINES else lines
+                chunks.append(f"### {person}\n" + "\n".join(tail))
+        _patterns_cache = "\n\n".join(chunks)
+        _patterns_cache_ts = now
+    except Exception as e:
+        logger.debug("Patterns context load failed: {}", e)
+
+    return _patterns_cache
 
 
 async def _get_crm_context() -> str:
@@ -340,6 +398,7 @@ async def cmd_help(message: TgMessage) -> None:
         "/evening — запустить вечерний свод\n"
         "/cancel — отменить вечерний свод / ввод заметки\n"
         "/reminders — список активных напоминаний\n"
+        "/pending — незакрытые петли (мяч на стороне ≥3 дн. + просрочки + напоминания)\n"
         "/who — список людей в CRM (inline-кнопки)\n"
         "/who Расул — карточка человека\n"
         "/project — список проектов (inline-кнопки)\n"
@@ -572,6 +631,78 @@ async def cmd_reminders(message: TgMessage) -> None:
     await _send_html(message, "\n".join(lines))
 
 
+@router.message(F.text == "/pending")
+async def cmd_pending(message: TgMessage) -> None:
+    """Незакрытые петли: жду от других (Мяч на стороне ≥3 дн.) + мои просрочки + напоминания."""
+    role = await _check_access(message)
+    if not role:
+        return
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    now = datetime.now()
+
+    # 1. Жду от других — Trello «Мяч на стороне» с last activity ≥ 3 дн.
+    stuck_others: list[tuple[int, str]] = []
+    try:
+        waiting = await _trello.get_cards("Мяч на стороне")
+        for c in waiting:
+            dla = c.get("dateLastActivity")
+            if not dla:
+                continue
+            try:
+                dt = datetime.fromisoformat(dla.replace("Z", "+00:00")).replace(tzinfo=None)
+                days = (now - dt).days
+                if days >= 3:
+                    stuck_others.append((days, c["name"]))
+            except Exception:
+                continue
+    except Exception as e:
+        logger.error("/pending — Мяч на стороне: {}", e)
+    stuck_others.sort(reverse=True)
+
+    # 2. Просрочки у меня — Trello «Сегодня» с due < сегодня
+    overdue_self: list[tuple[str, str]] = []
+    try:
+        today_cards = await _trello.get_cards("сегодня")
+        for c in today_cards:
+            due = c.get("due", "") or ""
+            if due and due[:10] < today_str:
+                overdue_self.append((due[:10], c["name"]))
+    except Exception as e:
+        logger.error("/pending — Сегодня: {}", e)
+    overdue_self.sort()
+
+    # 3. Активные напоминания у этого пользователя
+    reminders = get_active_reminders(message.from_user.id)
+
+    if not stuck_others and not overdue_self and not reminders:
+        await message.answer("Незакрытых петель нет — чисто.")
+        return
+
+    lines = ["<b>Незакрытые петли</b>\n"]
+    if stuck_others:
+        lines.append(f"<b>Жду от других ({len(stuck_others)}):</b>")
+        for days, name in stuck_others[:10]:
+            lines.append(f"  • {html_lib.escape(name)} — {days} дн.")
+        if len(stuck_others) > 10:
+            lines.append(f"  …и ещё {len(stuck_others) - 10}")
+        lines.append("")
+    if overdue_self:
+        lines.append(f"<b>Просрочено у меня ({len(overdue_self)}):</b>")
+        for due_str, name in overdue_self[:10]:
+            lines.append(f"  • {html_lib.escape(name)} — с {due_str}")
+        if len(overdue_self) > 10:
+            lines.append(f"  …и ещё {len(overdue_self) - 10}")
+        lines.append("")
+    if reminders:
+        lines.append(f"<b>Напоминания ({len(reminders)}):</b>")
+        for r in reminders[:10]:
+            lines.append(
+                f"  • {r.remind_at.strftime('%d.%m %H:%M')} — {html_lib.escape(r.text)}"
+            )
+    await _send_html(message, "\n".join(lines))
+
+
 @router.message(F.text.startswith("/who"))
 async def cmd_who(message: TgMessage) -> None:
     """Показать информацию о человеке из CRM."""
@@ -765,6 +896,195 @@ def _extract_card_id_from_reply(message: TgMessage) -> str | None:
     return None
 
 
+def _detect_forward_source(message: TgMessage) -> str | None:
+    """Если сообщение переслано — вернуть строку с источником. Иначе None.
+
+    Поддерживает aiogram 3.x: forward_origin (новое поле) и legacy forward_from*.
+    """
+    origin = getattr(message, "forward_origin", None)
+    if origin is not None:
+        sender = getattr(origin, "sender_user", None)
+        if sender:
+            name = " ".join(filter(None, [sender.first_name, sender.last_name])).strip() or "?"
+            return f"пользователь {name}"
+        chat = getattr(origin, "chat", None)
+        if chat:
+            title = getattr(chat, "title", None) or getattr(chat, "username", None) or "?"
+            return f"чат «{title}»"
+        sender_name = getattr(origin, "sender_user_name", None)
+        if sender_name:
+            return f"пользователь {sender_name} (скрытый профиль)"
+    # Legacy fields (на случай старой aiogram)
+    if message.forward_from:
+        u = message.forward_from
+        name = " ".join(filter(None, [u.first_name, u.last_name])).strip() or "?"
+        return f"пользователь {name}"
+    if message.forward_from_chat:
+        return f"чат «{message.forward_from_chat.title or '?'}»"
+    if message.forward_sender_name:
+        return f"пользователь {message.forward_sender_name} (скрытый профиль)"
+    return None
+
+
+def _cleanup_pending_forwards() -> None:
+    """Удалить просроченные forward-плановки."""
+    now = datetime.now()
+    expired = [k for k, v in _pending_forwards.items() if now - v["created_at"] > _FORWARD_TTL]
+    for k in expired:
+        _pending_forwards.pop(k, None)
+
+
+async def _process_forward(message: TgMessage, role: str, text: str, source: str) -> None:
+    """Forward → LLM в text-only режиме → план с inline-кнопками подтверждения."""
+    _cleanup_pending_forwards()
+
+    # 1. Собрать промпт
+    template = FORWARD_PROMPT_PATH.read_text(encoding="utf-8")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
+    system = (
+        template
+        .replace("{now}", now)
+        .replace("{role}", role)
+        .replace("{forward_source}", source)
+        .replace("{forward_text}", text)
+    )
+
+    await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+
+    # 2. LLM без tools — нужен только JSON-план
+    try:
+        raw = await _llm.chat(
+            messages=[{"role": "user", "content": "Разбери пересланное и верни JSON."}],
+            system=system,
+            max_tokens=2048,
+        )
+    except Exception as e:
+        logger.error("Forward LLM ошибка: {}", e)
+        await message.answer("Не смог разобрать пересланное. Попробуй описать текстом.")
+        return
+
+    # 3. Распарсить JSON (срезать возможную обвязку)
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    try:
+        plan = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        logger.error("Forward JSON parse error: {}\nRaw: {}", e, raw[:500])
+        await message.answer("Не понял пересланное (не JSON). Опиши текстом — что с этим сделать?")
+        return
+
+    summary = (plan.get("summary") or "").strip()
+    raw_actions = plan.get("actions") or []
+
+    # Whitelist: отбросить actions с unknown tool — LLM иногда придумывает имена
+    actions = []
+    rejected = []
+    for a in raw_actions:
+        if isinstance(a, dict) and a.get("tool") in _FORWARD_ALLOWED_TOOLS:
+            actions.append(a)
+        else:
+            rejected.append(a.get("tool") if isinstance(a, dict) else "?")
+    if rejected:
+        logger.warning("Forward отбросил unknown tools: {}", rejected)
+
+    if not actions:
+        # Нечего делать — просто резюмируем
+        msg = f"<i>Переслано от:</i> {source}\n<b>Понял так:</b> {summary}\n\nДействий не требуется."
+        await message.answer(msg, parse_mode=ParseMode.HTML)
+        return
+
+    # 4. Сохранить план + показать с кнопками
+    fwd_id = uuid.uuid4().hex[:10]
+    _pending_forwards[fwd_id] = {
+        "actions": actions,
+        "summary": summary,
+        "telegram_id": message.from_user.id,
+        "source": source,
+        "created_at": datetime.now(),
+    }
+
+    lines = [
+        f"<i>Переслано от:</i> {html_lib.escape(source)}",
+        f"<b>Понял так:</b> {html_lib.escape(summary)}",
+        "",
+        "<b>Предлагаю:</b>",
+    ]
+    for i, a in enumerate(actions, 1):
+        human = a.get("human") or a.get("tool") or "?"
+        lines.append(f"  {i}. {html_lib.escape(human)}")
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Сделать", callback_data=f"fwd_run_{fwd_id}"),
+        InlineKeyboardButton(text="✏️ Поправить", callback_data=f"fwd_edit_{fwd_id}"),
+        InlineKeyboardButton(text="❌ Не нужно", callback_data=f"fwd_cancel_{fwd_id}"),
+    ]])
+    await message.answer("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("fwd_"))
+async def on_forward_callback(callback: CallbackQuery) -> None:
+    """Обработать кнопки на forward-плане."""
+    parts = callback.data.split("_", 2)
+    if len(parts) < 3:
+        await callback.answer()
+        return
+    action, fwd_id = parts[1], parts[2]
+    pending = _pending_forwards.get(fwd_id)
+    if not pending:
+        await callback.answer("План истёк или уже выполнен.", show_alert=False)
+        return
+    if callback.from_user.id != pending["telegram_id"]:
+        await callback.answer("Это не твой план.", show_alert=False)
+        return
+
+    await callback.answer()
+
+    if action == "cancel":
+        _pending_forwards.pop(fwd_id, None)
+        try:
+            await callback.message.edit_text("❌ Отменено.")
+        except Exception:
+            pass
+        return
+
+    if action == "edit":
+        _pending_forwards.pop(fwd_id, None)
+        try:
+            await callback.message.edit_text(
+                "✏️ Хорошо, опиши текстом как поправить — обработаю по новой."
+            )
+        except Exception:
+            pass
+        return
+
+    if action == "run":
+        _pending_forwards.pop(fwd_id, None)
+        ctx = {"telegram_id": pending["telegram_id"]}
+        results: list[str] = []
+        for a in pending["actions"]:
+            tool = a.get("tool")
+            inp = a.get("input") or {}
+            human = a.get("human") or tool or "?"
+            if not tool:
+                continue
+            try:
+                await _executor.execute(tool, inp, context=ctx)
+                results.append(f"✅ {human}")
+            except Exception as e:
+                logger.error("Forward action {} failed: {}", tool, e)
+                results.append(f"⚠️ {human} — ошибка: {e}")
+        result_text = "Сделал:\n" + "\n".join(results)
+        try:
+            await callback.message.edit_text(result_text)
+        except Exception:
+            try:
+                await callback.message.answer(result_text)
+            except Exception as e:
+                logger.error("Forward result отправка не удалась: {}", e)
+
+
 @router.message(F.text)
 async def handle_text(message: TgMessage) -> None:
     role = await _check_access(message)
@@ -772,6 +1092,12 @@ async def handle_text(message: TgMessage) -> None:
         return
 
     tid = message.from_user.id
+
+    # Forwarded message — отдельный pipeline (план → подтверждение → выполнение)
+    fwd_source = _detect_forward_source(message)
+    if fwd_source and message.text:
+        await _process_forward(message, role, message.text, fwd_source)
+        return
 
     # Реплай на nudge/stuck/waiting → комментарий к карточке
     card_id = _extract_card_id_from_reply(message)

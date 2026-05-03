@@ -15,6 +15,54 @@ from abay_assistant.db import create_reminder, log_tool_usage
 LABELS_CACHE_TTL = timedelta(minutes=5)
 
 
+def summarize_tool_args(tool_name: str, inp: dict[str, Any]) -> str:
+    """Краткое описание аргументов tool call для логов и сводок.
+
+    Возвращает пустую строку для tools, по которым нет смысла хранить args
+    (read-only запросы — get_*, list_*, search_*).
+    """
+    if tool_name == "create_trello_card":
+        name = (inp.get("name") or "?")[:80]
+        lst = inp.get("list_name", "Сегодня")
+        return f"create→{lst}: {name}"
+    if tool_name == "move_trello_card":
+        return f"move→{inp.get('target_list', '?')}"
+    if tool_name == "rename_trello_card":
+        new = (inp.get("new_name") or "?")[:80]
+        return f"rename: {new}"
+    if tool_name == "update_trello_card":
+        parts = []
+        if inp.get("due"):
+            parts.append(f"due={inp['due'][:10]}")
+        if inp.get("desc"):
+            parts.append("desc")
+        if inp.get("name"):
+            parts.append("name")
+        return f"update: {','.join(parts)}" if parts else "update"
+    if tool_name == "add_trello_comment":
+        text = (inp.get("text") or "")[:60]
+        return f"comment: {text}"
+    if tool_name == "add_checklist_item":
+        return f"checklist+: {(inp.get('text') or '?')[:60]}"
+    if tool_name == "set_trello_card_cover":
+        return f"cover={inp.get('color', '?')}"
+    if tool_name == "create_calendar_event":
+        return f"event: {(inp.get('summary') or '?')[:60]}"
+    if tool_name == "set_reminder":
+        return f"reminder: {(inp.get('text') or '?')[:60]}"
+    if tool_name == "save_personal_pattern":
+        person = inp.get("person", "?")
+        obs = (inp.get("observation") or "?")[:80]
+        return f"pattern: {person} — {obs}"
+    if tool_name == "save_entity_note":
+        return f"crm: {(inp.get('entity_name') or '?')[:60]}"
+    if tool_name == "update_entity_meta":
+        return f"crm-meta: {(inp.get('entity_name') or '?')[:60]}"
+    if tool_name == "append_obsidian_daily":
+        return "daily-note"
+    return ""  # read-only / служебные — не логируем args
+
+
 class ToolExecutor:
     """Принимает tool_use блок от Claude, вызывает нужный сервис."""
 
@@ -49,11 +97,11 @@ class ToolExecutor:
         """Выполнить tool call. Возвращает строку результата для tool_result."""
         logger.info("Tool call: {}({})", tool_name, tool_input)
 
-        # Логировать использование tool
+        # Логировать использование tool с кратким описанием аргументов
         telegram_id = (context or {}).get("telegram_id")
         if telegram_id:
             try:
-                log_tool_usage(telegram_id, tool_name)
+                log_tool_usage(telegram_id, tool_name, summarize_tool_args(tool_name, tool_input))
             except Exception:
                 pass  # не блокировать tool call из-за метрики
 
@@ -117,6 +165,14 @@ class ToolExecutor:
                 if not results:
                     return "Ничего не найдено."
                 return results
+            case "save_personal_pattern":
+                path = await self.obsidian.append_personal_pattern(
+                    inp["person"], inp["observation"]
+                )
+                return f"Паттерн записан: {path}"
+            case "get_personal_patterns":
+                text = await self.obsidian.read_personal_patterns(inp["person"])
+                return text or f"Паттернов о {inp['person']} пока нет."
             case "set_reminder":
                 return self._set_reminder(inp, context)
             case "create_calendar_event":

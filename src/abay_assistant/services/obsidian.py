@@ -76,6 +76,39 @@ class ObsidianClient:
         return path
 
     # ─────────────────────────────────────────
+    # Personal patterns — привычки/предпочтения Алана и Абая
+    # ─────────────────────────────────────────
+
+    def _patterns_path(self, person: str) -> Path:
+        safe = _sanitize_name(person) or "Unknown"
+        fp = (self.vault / "Patterns" / f"{safe}.md").resolve()
+        if not str(fp).startswith(str(self.vault.resolve())):
+            raise ValueError(f"Невалидный путь паттернов: '{person}'")
+        return fp
+
+    async def append_personal_pattern(self, person: str, observation: str) -> str:
+        """Дописать наблюдение о привычке/предпочтении. Формат: дата + одна строка."""
+        fp = self._patterns_path(person)
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        line = f"- {today}: {observation.strip()}\n"
+        if fp.exists():
+            existing = fp.read_text(encoding="utf-8")
+            fp.write_text(existing.rstrip() + "\n" + line, encoding="utf-8")
+        else:
+            fp.write_text(f"# Паттерны: {person}\n\n{line}", encoding="utf-8")
+        rel = fp.relative_to(self.vault)
+        logger.info("Obsidian: pattern → {}", rel)
+        return str(rel)
+
+    async def read_personal_patterns(self, person: str) -> str:
+        """Прочитать накопленные паттерны. Пусто если файла нет."""
+        fp = self._patterns_path(person)
+        if fp.exists():
+            return fp.read_text(encoding="utf-8")
+        return ""
+
+    # ─────────────────────────────────────────
     # YAML frontmatter helpers
     # ─────────────────────────────────────────
 
@@ -151,6 +184,21 @@ class ObsidianClient:
         if fp.exists():
             existing = fp.read_text(encoding="utf-8")
             meta, body = self._parse_frontmatter(existing)
+            # Дедуп: если такой content уже есть в теле дословно — пропустить запись.
+            # meta всё равно обновим (last_updated, links), но новый ### блок не плодим.
+            if content.strip() and content.strip() in body:
+                logger.info("Obsidian: дубль content для {} — обновлю только meta", entity_name)
+                if meta_update:
+                    for key, val in meta_update.items():
+                        if val is not None:
+                            meta[key] = val
+                meta["last_updated"] = today
+                fp.write_text(self._build_frontmatter(meta, body), encoding="utf-8")
+                rel_path = str(fp.relative_to(self.vault))
+                # обратные связи всё равно прогоним — могли появиться новые
+                links = self._extract_wiki_links(content)
+                await self._cross_link(entity_type, entity_name, links)
+                return rel_path
         else:
             # Новый файл — создаём базовую структуру
             meta = {"type": entity_type}

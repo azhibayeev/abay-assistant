@@ -157,6 +157,7 @@ async def main() -> None:
         BotCommand(command="undo", description="Отменить последний обмен"),
         BotCommand(command="retry", description="Повторить последний запрос"),
         BotCommand(command="reminders", description="Активные напоминания"),
+        BotCommand(command="pending", description="Незакрытые петли (мяч на стороне + просрочки)"),
         BotCommand(command="evening", description="Вечерний свод"),
         BotCommand(command="stats", description="Статистика за 7 дней"),
         BotCommand(command="who", description="Найти человека в CRM"),

@@ -22,15 +22,6 @@ class Message(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.now)
 
 
-class Pending(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    telegram_id: int = Field(index=True)
-    text: str
-    source: str = "telegram"  # "telegram" | "voice" | "trello"
-    processed: bool = False
-    created_at: datetime = Field(default_factory=datetime.now)
-
-
 class Reminder(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     telegram_id: int = Field(index=True)
@@ -56,6 +47,7 @@ class ToolUsage(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     telegram_id: int = Field(index=True)
     tool_name: str = Field(index=True)
+    args_summary: str = Field(default="")  # короткое описание аргументов: «create: name», «move→Готово»
     created_at: datetime = Field(default_factory=datetime.now)
 
 
@@ -85,7 +77,15 @@ def _get_engine():
 
 
 def init_db() -> None:
-    SQLModel.metadata.create_all(_get_engine())
+    engine = _get_engine()
+    SQLModel.metadata.create_all(engine)
+    # Миграция: добавить args_summary в существующую toolusage (SQLite ALTER идемпотентен через try)
+    from sqlalchemy import text as _sql_text
+    with engine.begin() as conn:
+        try:
+            conn.execute(_sql_text("ALTER TABLE toolusage ADD COLUMN args_summary VARCHAR DEFAULT ''"))
+        except Exception:
+            pass  # колонка уже есть
 
 
 def get_session() -> Session:
@@ -265,11 +265,28 @@ def save_daily_stat(
         return stat
 
 
-def log_tool_usage(telegram_id: int, tool_name: str) -> None:
-    """Записать вызов tool."""
+def log_tool_usage(telegram_id: int, tool_name: str, args_summary: str = "") -> None:
+    """Записать вызов tool с кратким описанием аргументов."""
     with get_session() as session:
-        session.add(ToolUsage(telegram_id=telegram_id, tool_name=tool_name))
+        session.add(ToolUsage(
+            telegram_id=telegram_id,
+            tool_name=tool_name,
+            args_summary=args_summary[:200],  # лимит на длину
+        ))
         session.commit()
+
+
+def get_tool_actions(days: int = 1) -> list[dict]:
+    """Tool calls с непустым args_summary за N дней — для конкретики в сводках."""
+    cutoff = datetime.now() - timedelta(days=days)
+    with get_session() as session:
+        stmt = (
+            select(ToolUsage)
+            .where(ToolUsage.created_at >= cutoff, ToolUsage.args_summary != "")
+            .order_by(ToolUsage.created_at)
+        )
+        rows = session.exec(stmt).all()
+        return [{"tool_name": r.tool_name, "args": r.args_summary} for r in rows]
 
 
 def get_tool_stats(days: int = 7) -> list[dict]:

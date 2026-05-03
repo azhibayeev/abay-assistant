@@ -517,39 +517,19 @@ def _mention_assistant() -> str:
 
 
 def _format_evening_group_message(cards: list[dict], events: list[dict], mention: str) -> str:
-    """Собрать вечернее сообщение для группы."""
+    """Собрать вечернее сообщение для группы — только просьба к Абаю.
+
+    Список «Сегодня» и расписание уже шли в свод 21:00 (DM). Здесь — чистый сбор апдейтов.
+    """
     today = datetime.now().strftime("%d.%m.%Y, %A")
-
-    lines = [f"<b>Вечерний свод — {today}</b>", ""]
-
-    if cards:
-        lines.append(f"<b>Задачи на сегодня ({len(cards)}):</b>")
-        for c in cards:
-            lines.append(f"  {_cover_emoji(c)} {c['name']}")
-    else:
-        lines.append("<b>Задачи на сегодня:</b> пусто")
-    lines.append("")
-
-    if events:
-        lines.append(f"<b>Расписание ({len(events)}):</b>")
-        for e in events:
-            time_str = (e.get("start", "") or "")[11:16]
-            summary = e.get("summary", "(без названия)")
-            prefix = f"{time_str} — " if time_str else ""
-            lines.append(f"  • {prefix}{summary}")
-    else:
-        lines.append("<b>Расписание:</b> пусто")
-    lines.append("")
-
-    lines.append(
+    return (
+        f"<b>Вечерний свод — {today}</b>\n\n"
         f"{mention}, что Вы сделали сегодня и какие новые задачи появились?\n"
         f"Также откройте, пожалуйста, WhatsApp и посмотрите, с кем была переписка сегодня — "
         f"что из этого нужно записать в задачи?\n\n"
         f"Можно отвечать голосом, в несколько сообщений. "
         f"Через 5 минут после последнего голосового я соберу всё вместе и переспрошу, правильно ли понял."
     )
-
-    return "\n".join(lines)
 
 
 # ─────────────────────────────────────────────
@@ -943,55 +923,110 @@ async def forgotten_contacts() -> None:
 # ─────────────────────────────────────────────
 
 async def daily_summary_for_assistant() -> None:
-    """Сводка дня: отправляется в группу и ассистенту."""
+    """Свод дня: конкретные факты — что закрыто, что осталось, что было в календаре."""
     logger.info("Запуск daily_summary_for_assistant")
     try:
-        now = datetime.now()
-        today_str = now.strftime("%Y-%m-%d")
+        s = get_settings()
+        tz = ZoneInfo(s.timezone)
+        now_local = datetime.now(tz)
+        today_str = now_local.strftime("%Y-%m-%d")
+        day_start_utc = now_local.replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).astimezone(ZoneInfo("UTC"))
 
-        # Собрать данные
-        from abay_assistant.db import get_message_stats, get_tool_stats
-        msg_stats = get_message_stats(days=1)
-        tool_stats = get_tool_stats(days=1)
-        today_cards = await _get_today_cards()
-        week_cards = await _safe_get_cards(TrelloList.WEEK)
+        def _touched_today(card: dict) -> bool:
+            ts = card.get("dateLastActivity")
+            if not ts:
+                return False
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except Exception:
+                return False
+            return dt >= day_start_utc
+
+        # Сбор сырых данных по спискам
+        async def _list_or_empty(lst: TrelloList) -> list[dict]:
+            try:
+                return await _trello.get_cards(lst)
+            except Exception as e:
+                logger.error("Trello get_cards('{}'): {}", lst, e)
+                return []
+
+        today_raw, done_raw, archive_raw = await asyncio.gather(
+            _list_or_empty(TrelloList.TODAY),
+            _list_or_empty(TrelloList.DONE),
+            _list_or_empty(TrelloList.ARCHIVE),
+        )
+
+        today_cards = [f"{_cover_emoji(c)} {c['name']}" for c in today_raw]
+        closed_today = [c["name"] for c in done_raw if _touched_today(c)]
+        archived_today = [c["name"] for c in archive_raw if _touched_today(c)]
+        moved_today = [c["name"] for c in today_raw if _touched_today(c)]
+
+        events_lines = []
+        for e in await _get_today_events():
+            t = (e.get("start", "") or "")[11:16]
+            summary_e = e.get("summary", "(без названия)")
+            events_lines.append(f"{t} — {summary_e}" if t else summary_e)
+
         daily_note = ""
         try:
             daily_note = await _obsidian.read_note(f"Daily/{today_str}.md")
         except Exception:
             pass
 
-        tool_summary = ", ".join(
-            f"{t['tool_name']}: {t['count']}" for t in tool_stats[:10]
-        ) if tool_stats else "нет вызовов"
+        # Действия бота за день (из ToolUsage.args_summary) — группируем по типу
+        from abay_assistant.db import get_tool_actions
+        actions = get_tool_actions(days=1)
+        actions_by_tool: dict[str, list[str]] = defaultdict(list)
+        for a in actions:
+            actions_by_tool[a["tool_name"]].append(a["args"])
+        actions_lines = []
+        for tname, items in sorted(actions_by_tool.items()):
+            sample = "; ".join(items[:5])
+            extra = f" (+ ещё {len(items) - 5})" if len(items) > 5 else ""
+            actions_lines.append(f"{tname} ×{len(items)}: {sample}{extra}")
+
+        def _bullet(items: list[str]) -> str:
+            return "\n".join(f"- {x}" for x in items) if items else "(пусто)"
 
         context = (
-            f"Дата: {today_str}\n"
-            f"Сообщений: {msg_stats['user_messages']} от пользователя, "
-            f"{msg_stats['bot_messages']} от бота\n"
-            f"Инструменты: {tool_summary}\n"
-            f"Карточки «Сегодня»: {len(today_cards)}\n"
-            f"Карточки «Неделя»: {len(week_cards)}\n"
+            f"Дата: {today_str}\n\n"
+            f"Закрыто за день ({len(closed_today)}):\n{_bullet(closed_today)}\n\n"
+            f"Отправлено в архив ({len(archived_today)}):\n{_bullet(archived_today)}\n\n"
+            f"Менялось в «Сегодня» за день ({len(moved_today)}):\n{_bullet(moved_today)}\n\n"
+            f"Осталось в «Сегодня» к концу дня ({len(today_cards)}):\n{_bullet(today_cards)}\n\n"
+            f"События календаря ({len(events_lines)}):\n{_bullet(events_lines)}\n\n"
+            f"Действия бота за день ({len(actions)}):\n{_bullet(actions_lines)}\n\n"
+            f"Дневная заметка:\n{daily_note or '(пусто)'}\n"
         )
-        if daily_note:
-            context += f"\nДневная заметка:\n{daily_note[:1000]}\n"
 
         system = (
-            "Ты готовишь краткую сводку дня. "
-            "Пиши на русском, кратко (5-10 строк). Включи: "
-            "ключевые действия за день, текущий статус задач, что примечательного. "
-            "Не повторяй сырые данные — интерпретируй и резюмируй."
+            "Ты пишешь свод дня для Абая. Жёсткие правила:\n"
+            "- ТОЛЬКО конкретные факты из данных ниже: имена карточек, время событий, цитаты из заметки.\n"
+            "- НИКАКИХ общих фраз: «продуктивный день», «активная работа», «много задач», "
+            "«в фокусе текущие дела», «детальная работа с приоритетами» — это бан.\n"
+            "- НИКАКИХ выдуманных метрик («N обращений говорят о...»). Если факта нет — не упоминай.\n"
+            "- АБСОЛЮТНЫЙ ЗАПРЕТ на markdown-заголовки `##`, `###`. Только обычный текст и **жирный** через `**`.\n"
+            "- Структура: 4 коротких блока — **Закрыли:**, **Осталось:**, **События/заметка:**, **Бот сделал:** "
+            "(коротко обобщи действия бота — сколько карточек создано/перемещено/обновлено). "
+            "По 1-3 строки в блоке. Если по блоку пусто — пропусти его, не пиши «нет данных».\n"
+            "- Стиль разговорный, с маленькой буквы. Без пафоса.\n"
+            "- Если день пустой (ничего не закрыто, ничего не менялось, событий нет) — "
+            "так и напиши одной строкой, без украшательств.\n"
         )
 
         summary = await _llm.chat(
-            messages=[{"role": "user", "content": f"Данные за день:\n{context}"}],
+            messages=[{"role": "user", "content": context}],
             system=system,
             max_tokens=1024,
         )
 
-        # В личку обоим (Алан + Абай) — личная сводка, не для группы
-        header = f"📋 **Сводка дня ({today_str}):**\n\n"
-        await _send_dm_both(header + summary)
+        # Страховка: вырезать любые случайные markdown-заголовки из вывода LLM
+        cleaned = re.sub(r"^#{1,6}\s*", "", summary, flags=re.MULTILINE).strip()
+
+        header = f"📋 **Свод дня — {today_str}**\n\n"
+        await _send_dm_both(header + cleaned)
 
         logger.info("daily_summary отправлен в личку")
 
