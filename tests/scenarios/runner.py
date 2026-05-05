@@ -35,9 +35,11 @@ class ToolCall:
     result: str
 
     def short(self) -> str:
-        inp_short = json.dumps(self.input, ensure_ascii=False)[:200]
-        res_short = self.result[:200] if self.result else ""
-        return f"{self.name}({inp_short}) → {res_short}"
+        # Полный input — судья оценивает по аргументам, обрезание прячет важное (label, due и т.п.).
+        # Result обрезаем — там часто длинный JSON карточки.
+        inp_full = json.dumps(self.input, ensure_ascii=False)
+        res_short = self.result[:300] if self.result else ""
+        return f"{self.name}({inp_full}) → {res_short}"
 
 
 @dataclass
