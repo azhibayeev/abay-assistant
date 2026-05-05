@@ -7,7 +7,16 @@ import traceback
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers import SchedulerNotRunningError
 from loguru import logger
+
+
+def _safe_scheduler_shutdown(scheduler: AsyncIOScheduler) -> None:
+    """Idempotent shutdown — повторный вызов даёт SchedulerNotRunningError."""
+    try:
+        scheduler.shutdown(wait=False)
+    except SchedulerNotRunningError:
+        pass
 
 from abay_assistant.config import get_settings
 from abay_assistant.db import init_db
@@ -143,7 +152,7 @@ async def main() -> None:
 
     def _shutdown_signal() -> None:
         logger.info("Получен сигнал завершения, останавливаю...")
-        scheduler.shutdown(wait=False)
+        _safe_scheduler_shutdown(scheduler)
         for task in asyncio.all_tasks(loop):
             task.cancel()
 
@@ -189,7 +198,7 @@ async def _run_polling(bot: Bot, dp: Dispatcher, s, scheduler) -> None:
     except asyncio.CancelledError:
         pass
     finally:
-        scheduler.shutdown(wait=False)
+        _safe_scheduler_shutdown(scheduler)
         try:
             await bot.send_message(s.telegram_owner_id, "Бот остановлен.")
         except Exception:
@@ -237,7 +246,7 @@ async def _run_webhook(bot: Bot, dp: Dispatcher, s, scheduler) -> None:
     except asyncio.CancelledError:
         pass
     finally:
-        scheduler.shutdown(wait=False)
+        _safe_scheduler_shutdown(scheduler)
         await bot.delete_webhook()
         await runner.cleanup()
         try:

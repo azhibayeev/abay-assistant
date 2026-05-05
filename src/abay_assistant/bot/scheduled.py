@@ -95,6 +95,19 @@ async def _send_to_all(text: str) -> None:
                     break
 
 
+def _log_scheduled_error(task_name: str, e: Exception) -> None:
+    """Логировать ошибку запланированной задачи. Forbidden → INFO, остальное → ERROR.
+
+    Forbidden от Telegram = пользователь не начинал диалог с ботом. Это не баг
+    рантайма, и засорение ERROR-логов мешает мониторить реальные проблемы.
+    """
+    msg = str(e).lower()
+    if "forbidden" in msg or "can't initiate conversation" in msg:
+        logger.info("{} пропущен (Telegram Forbidden): {}", task_name, e)
+    else:
+        logger.error("Ошибка {}: {}", task_name, e)
+
+
 async def _send_dm(target_id: int, text: str, reply_markup=None) -> None:
     """Отправить личное сообщение конкретному пользователю (с markdown→html)."""
     from abay_assistant.bot.handlers import _md_to_html
@@ -106,7 +119,13 @@ async def _send_dm(target_id: int, text: str, reply_markup=None) -> None:
     try:
         await _bot.send_message(target_id, html, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
     except Exception as e:
-        logger.error("Не удалось отправить DM {}: {}", target_id, e)
+        # Forbidden — пользователь не начал диалог с ботом первым. Это не ошибка
+        # рантайма (мы ничего не можем сделать), но засоряет ERROR-логи и crash-метрики.
+        msg = str(e).lower()
+        if "forbidden" in msg or "can't initiate conversation" in msg:
+            logger.info("DM {} пропущен (юзер не писал боту): {}", target_id, e)
+        else:
+            logger.error("Не удалось отправить DM {}: {}", target_id, e)
 
 
 async def _send_to_assistant(text: str, reply_markup=None) -> None:
@@ -844,7 +863,7 @@ async def meeting_prep() -> None:
         _notified_meetings.difference_update(stale_keys)
 
     except Exception as e:
-        logger.error("Ошибка meeting_prep: {}", e)
+        _log_scheduled_error("meeting_prep", e)
 
 
 # ─────────────────────────────────────────────
@@ -1077,7 +1096,7 @@ async def stuck_tasks() -> None:
         logger.info("stuck_tasks: отправлено ({} карточек)", len(stuck))
 
     except Exception as e:
-        logger.error("Ошибка stuck_tasks: {}", e)
+        _log_scheduled_error("stuck_tasks", e)
 
 
 # ─────────────────────────────────────────────
@@ -1168,7 +1187,7 @@ async def card_nudge() -> None:
         logger.info("card_nudge: отправлено ({} карточек)", len(nudge_cards))
 
     except Exception as e:
-        logger.error("Ошибка card_nudge: {}", e)
+        _log_scheduled_error("card_nudge", e)
 
 
 # ─────────────────────────────────────────────
