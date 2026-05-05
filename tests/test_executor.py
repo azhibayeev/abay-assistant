@@ -259,6 +259,62 @@ async def test_create_card_returns_list_name_in_candidate(tool_executor, mock_tr
     assert parsed["candidates"][0]["list"] == "неделя 5–11 май"
 
 
+async def test_find_card_returns_top_matches(tool_executor, mock_trello):
+    """find_trello_card возвращает совпадения по fuzzy."""
+    mock_trello.get_all_cards = AsyncMock(return_value=[
+        {"id": "c1", "name": "Встреча с Абеке по инвест-линии", "idList": "list_today"},
+        {"id": "c2", "name": "Связаться с Ханом по China Railways", "idList": "list_week"},
+        {"id": "c3", "name": "DMS дискавери — партнёрство", "idList": "list_week"},
+    ])
+    result = await tool_executor.execute(
+        "find_trello_card",
+        {"query": "Абеке инвест"},
+    )
+    parsed = json.loads(result)
+    assert len(parsed) >= 1
+    assert parsed[0]["id"] == "c1"
+    assert parsed[0]["score"] >= 60
+
+
+async def test_find_card_no_match_returns_empty(tool_executor, mock_trello):
+    """Если нет совпадений выше порога — пустой список."""
+    mock_trello.get_all_cards = AsyncMock(return_value=[
+        {"id": "c1", "name": "Совершенно другая задача", "idList": "list_today"},
+    ])
+    result = await tool_executor.execute(
+        "find_trello_card",
+        {"query": "квантовая физика"},
+    )
+    parsed = json.loads(result)
+    assert parsed == []
+
+
+async def test_find_card_excludes_archive(tool_executor, mock_trello):
+    """Карточки в архиве/ГОТОВО не должны находиться."""
+    mock_trello.get_all_cards = AsyncMock(return_value=[
+        {"id": "arch1", "name": "Встреча с Абеке по инвест-линии", "idList": "list_archive"},
+    ])
+    result = await tool_executor.execute(
+        "find_trello_card",
+        {"query": "Абеке инвест"},
+    )
+    parsed = json.loads(result)
+    assert parsed == []
+
+
+async def test_find_card_includes_list_name(tool_executor, mock_trello):
+    """Имя колонки возвращается, чтобы LLM мог сразу принять решение move_trello_card."""
+    mock_trello.get_all_cards = AsyncMock(return_value=[
+        {"id": "c1", "name": "Встреча с Абеке по инвест-линии", "idList": "list_today"},
+    ])
+    result = await tool_executor.execute(
+        "find_trello_card",
+        {"query": "Абеке"},
+    )
+    parsed = json.loads(result)
+    assert parsed[0]["list"] == "сегодня"
+
+
 async def test_create_card_invalidates_cache_on_success(tool_executor, mock_trello):
     """После успешного создания кеш сбрасывается — следующий вызов увидит новую карточку."""
     mock_trello.get_all_cards = AsyncMock(return_value=[])

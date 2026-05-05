@@ -16,6 +16,7 @@ from abay_assistant.db import create_reminder, log_tool_usage
 LABELS_CACHE_TTL = timedelta(minutes=5)
 ACTIVE_CARDS_CACHE_TTL = timedelta(seconds=60)
 DUPLICATE_THRESHOLD = 85
+FIND_THRESHOLD = 50  # для find_trello_card — порог ниже, потому что это поиск, а не дедуп
 # Колонки, в которых не ищем дубли — туда уходит уже отработанное.
 EXCLUDED_LIST_NAMES = frozenset({"архив", "готово"})
 
@@ -192,6 +193,8 @@ class ToolExecutor:
                 return await self.trello.add_checklist_item(inp["card_id"], inp["text"])
             case "get_trello_cards":
                 return await self._get_cards(inp)
+            case "find_trello_card":
+                return await self._find_card(inp)
             case "append_obsidian_daily":
                 path = await self.obsidian.append_daily(inp["content"])
                 return f"Записано в {path}"
@@ -373,3 +376,38 @@ class ToolExecutor:
             }
             for c in cards
         ]
+
+    async def _find_card(self, inp: dict[str, Any]) -> list[dict]:
+        """Fuzzy-поиск по всем активным колонкам. Возвращает топ совпадений с score."""
+        query = inp["query"]
+        limit = int(inp.get("limit", 5))
+        cards = await self._get_active_cards_cached()
+        if not cards:
+            return []
+        choices = {c["id"]: c.get("name", "") for c in cards if c.get("name")}
+        if not choices:
+            return []
+        # WRatio комбинирует partial/token-sort/token-set + штрафы за длину.
+        # Лучше для поисковых запросов («Абеке инвест» → «Встреча с Абеке по инвест-линии»),
+        # тогда как token_set_ratio для дедупа точнее.
+        matches = process.extract(
+            query,
+            choices,
+            scorer=fuzz.WRatio,
+            limit=limit,
+            score_cutoff=FIND_THRESHOLD,
+        )
+        cards_by_id = {c["id"]: c for c in cards}
+        out = []
+        for matched_name, score, card_id in matches:
+            card = cards_by_id.get(card_id)
+            if not card:
+                continue
+            out.append({
+                "id": card["id"],
+                "name": matched_name,
+                "list": self._list_id_to_name.get(card.get("idList", ""), "?"),
+                "due": card.get("due"),
+                "score": int(score),
+            })
+        return out
