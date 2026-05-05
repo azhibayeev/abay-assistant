@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from dotenv import load_dotenv
+from sqlmodel import SQLModel, create_engine
 
 
 @pytest.fixture(autouse=True)
@@ -27,3 +28,12 @@ def _patch_settings(monkeypatch):
 
     from abay_assistant.config import get_settings
     get_settings.cache_clear()
+
+    # In-memory DB с инициализированными таблицами — иначе set_reminder и
+    # log_tool_usage падают на «no such table». Сделано как у in_memory_db
+    # фикстуры в верхнем conftest.
+    engine = create_engine("sqlite:///:memory:", echo=False)
+    SQLModel.metadata.create_all(engine)
+    import abay_assistant.db as db_module
+    monkeypatch.setattr(db_module, "_engine", engine)
+    monkeypatch.setattr(db_module, "_get_engine", lambda: engine)
