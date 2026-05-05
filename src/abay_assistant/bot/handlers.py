@@ -926,6 +926,23 @@ def _detect_forward_source(message: TgMessage) -> str | None:
     return None
 
 
+def _detect_duplicate_warning(raw_result: str) -> str | None:
+    """Если результат tool — JSON со status=possible_duplicate, вернуть человекочитаемый warn."""
+    if not raw_result or not raw_result.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(raw_result)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(parsed, dict) or parsed.get("status") != "possible_duplicate":
+        return None
+    cands = parsed.get("candidates") or []
+    if not cands:
+        return "возможный дубль"
+    names = ", ".join(f"«{c.get('name', '?')}»" for c in cands[:3])
+    return f"возможный дубль: {names} — обработай вручную"
+
+
 def _cleanup_pending_forwards() -> None:
     """Удалить просроченные forward-плановки."""
     now = datetime.now()
@@ -1070,8 +1087,15 @@ async def on_forward_callback(callback: CallbackQuery) -> None:
             if not tool:
                 continue
             try:
-                await _executor.execute(tool, inp, context=ctx)
-                results.append(f"✅ {human}")
+                raw = await _executor.execute(tool, inp, context=ctx)
+                # _create_card может вернуть status=possible_duplicate вместо создания.
+                # В forward-flow нет LLM-петли, поэтому показываем подозрение пользователю
+                # и не молча создаём дубликат.
+                dup_warn = _detect_duplicate_warning(raw)
+                if dup_warn:
+                    results.append(f"⚠️ {human} — {dup_warn}")
+                else:
+                    results.append(f"✅ {human}")
             except Exception as e:
                 logger.error("Forward action {} failed: {}", tool, e)
                 results.append(f"⚠️ {human} — ошибка: {e}")

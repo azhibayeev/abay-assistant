@@ -174,3 +174,105 @@ async def test_get_cards_includes_desc(tool_executor, mock_trello):
     result = await tool_executor.execute("get_trello_cards", {"list_name": "Сегодня"})
     parsed = json.loads(result)
     assert parsed[0]["desc"] == "Some desc"
+
+
+# ── Fuzzy duplicate detection в _create_card ────────────────────────────────
+
+async def test_create_card_blocks_exact_duplicate(tool_executor, mock_trello):
+    """Точное совпадение имени — карточка не создаётся, возвращается possible_duplicate."""
+    mock_trello.get_all_cards = AsyncMock(return_value=[
+        {"id": "old1", "name": "Встреча с Абеке по инвест-линии", "idList": "list_today"},
+    ])
+    result = await tool_executor.execute(
+        "create_trello_card",
+        {"name": "Встреча с Абеке по инвест-линии"},
+    )
+    mock_trello.create_card.assert_not_awaited()
+    parsed = json.loads(result)
+    assert parsed["status"] == "possible_duplicate"
+    assert parsed["candidates"][0]["id"] == "old1"
+    assert parsed["candidates"][0]["score"] >= 85
+
+
+async def test_create_card_blocks_reordered_words(tool_executor, mock_trello):
+    """token_set_ratio ловит перестановку и подмножества слов."""
+    mock_trello.get_all_cards = AsyncMock(return_value=[
+        {"id": "old1", "name": "Связаться с Ханом по China Railways", "idList": "list_today"},
+    ])
+    result = await tool_executor.execute(
+        "create_trello_card",
+        {"name": "Связаться с Ханом по China Railways (асинхрон)"},
+    )
+    mock_trello.create_card.assert_not_awaited()
+    parsed = json.loads(result)
+    assert parsed["status"] == "possible_duplicate"
+
+
+async def test_create_card_allows_distinct_names(tool_executor, mock_trello):
+    """Совершенно другая задача — создаётся нормально."""
+    mock_trello.get_all_cards = AsyncMock(return_value=[
+        {"id": "old1", "name": "Связаться с Ханом по China Railways", "idList": "list_today"},
+    ])
+    result = await tool_executor.execute(
+        "create_trello_card",
+        {"name": "Подготовить презентацию для совета директоров"},
+    )
+    mock_trello.create_card.assert_awaited_once()
+
+
+async def test_create_card_force_bypasses_check(tool_executor, mock_trello):
+    """force=true пробивает fuzzy-проверку, даже если есть похожая."""
+    mock_trello.get_all_cards = AsyncMock(return_value=[
+        {"id": "old1", "name": "Встреча с Абеке по инвест-линии", "idList": "list_today"},
+    ])
+    result = await tool_executor.execute(
+        "create_trello_card",
+        {"name": "Встреча с Абеке по инвест-линии", "force": True},
+    )
+    mock_trello.create_card.assert_awaited_once()
+
+
+async def test_create_card_ignores_archive_column(tool_executor, mock_trello):
+    """Карточки в «архив» и «ГОТОВО» не считаются дублями."""
+    mock_trello.get_all_cards = AsyncMock(return_value=[
+        {"id": "arch1", "name": "Встреча с Абеке по инвест-линии", "idList": "list_archive"},
+        {"id": "done1", "name": "Встреча с Абеке по инвест-линии", "idList": "list_done"},
+    ])
+    result = await tool_executor.execute(
+        "create_trello_card",
+        {"name": "Встреча с Абеке по инвест-линии"},
+    )
+    mock_trello.create_card.assert_awaited_once()
+
+
+async def test_create_card_returns_list_name_in_candidate(tool_executor, mock_trello):
+    """В кандидатах присутствует имя колонки, чтобы LLM мог принять решение."""
+    mock_trello.get_all_cards = AsyncMock(return_value=[
+        {"id": "old1", "name": "DMS дискавери — партнёрство с Маратом", "idList": "list_week"},
+    ])
+    result = await tool_executor.execute(
+        "create_trello_card",
+        {"name": "DMS дискавери партнёрство с Маратом"},
+    )
+    parsed = json.loads(result)
+    assert parsed["status"] == "possible_duplicate"
+    assert parsed["candidates"][0]["list"] == "неделя 5–11 май"
+
+
+async def test_create_card_invalidates_cache_on_success(tool_executor, mock_trello):
+    """После успешного создания кеш сбрасывается — следующий вызов увидит новую карточку."""
+    mock_trello.get_all_cards = AsyncMock(return_value=[])
+    await tool_executor.execute(
+        "create_trello_card",
+        {"name": "Уникальная задача"},
+    )
+    # Если бы кеш не сбрасывался, второй вызов вернул бы пустой список и пропустил бы дубль.
+    mock_trello.get_all_cards = AsyncMock(return_value=[
+        {"id": "new1", "name": "Уникальная задача", "idList": "list_today"},
+    ])
+    result = await tool_executor.execute(
+        "create_trello_card",
+        {"name": "Уникальная задача"},
+    )
+    parsed = json.loads(result)
+    assert parsed["status"] == "possible_duplicate"

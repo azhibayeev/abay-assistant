@@ -62,6 +62,16 @@ def mock_trello():
         {"id": "lbl3", "name": "Срочно"},
         {"id": "lbl4", "name": "Денежная"},
     ])
+    # Для fuzzy duplicate-проверки в _create_card. По умолчанию доска пуста.
+    trello.get_all_cards = AsyncMock(return_value=[])
+    trello.get_lists = AsyncMock(return_value={
+        "сегодня": "list_today",
+        "неделя 5–11 май": "list_week",
+        "Мяч на стороне": "list_ball",
+        "Backlog": "list_backlog",
+        "архив": "list_archive",
+        "ГОТОВО": "list_done",
+    })
     return trello
 
 

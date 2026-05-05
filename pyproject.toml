@@ -16,6 +16,7 @@ dependencies = [
     "python-dotenv",
     "openai",
     "pyyaml",
+    "rapidfuzz",
 ]
 
 [project.optional-dependencies]

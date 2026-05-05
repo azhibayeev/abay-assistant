@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from loguru import logger
+from rapidfuzz import fuzz, process
 
 from abay_assistant.services.trello import TrelloClient
 from abay_assistant.services.obsidian import ObsidianClient
@@ -13,6 +14,10 @@ from abay_assistant.services.web import web_search, web_fetch
 from abay_assistant.db import create_reminder, log_tool_usage
 
 LABELS_CACHE_TTL = timedelta(minutes=5)
+ACTIVE_CARDS_CACHE_TTL = timedelta(seconds=60)
+DUPLICATE_THRESHOLD = 85
+# Колонки, в которых не ищем дубли — туда уходит уже отработанное.
+EXCLUDED_LIST_NAMES = frozenset({"архив", "готово"})
 
 
 def summarize_tool_args(tool_name: str, inp: dict[str, Any]) -> str:
@@ -77,6 +82,61 @@ class ToolExecutor:
         self.calendar = calendar
         self._labels_cache: list[dict] | None = None
         self._labels_cached_at: datetime | None = None
+        self._active_cards_cache: list[dict] | None = None
+        self._active_cards_cached_at: datetime | None = None
+        self._list_id_to_name: dict[str, str] = {}
+
+    async def _get_active_cards_cached(self) -> list[dict]:
+        """Открытые карточки доски, минус «архив»/«ГОТОВО». Кеш 60с."""
+        now = datetime.now()
+        if (
+            self._active_cards_cache is not None
+            and self._active_cards_cached_at is not None
+            and now - self._active_cards_cached_at < ACTIVE_CARDS_CACHE_TTL
+        ):
+            return self._active_cards_cache
+
+        lists = await self.trello.get_lists()  # {name: id}
+        self._list_id_to_name = {lid: name for name, lid in lists.items()}
+        excluded_ids = {
+            lid for name, lid in lists.items()
+            if name.lower() in EXCLUDED_LIST_NAMES
+        }
+        all_cards = await self.trello.get_all_cards()
+        self._active_cards_cache = [
+            c for c in all_cards if c.get("idList") not in excluded_ids
+        ]
+        self._active_cards_cached_at = now
+        return self._active_cards_cache
+
+    async def _find_duplicate_candidates(self, name: str) -> list[dict]:
+        """Карточки с fuzzy-сходством >= DUPLICATE_THRESHOLD к данному имени."""
+        cards = await self._get_active_cards_cached()
+        if not cards:
+            return []
+        choices = {c["id"]: c.get("name", "") for c in cards if c.get("name")}
+        if not choices:
+            return []
+        matches = process.extract(
+            name,
+            choices,
+            scorer=fuzz.token_set_ratio,
+            limit=3,
+            score_cutoff=DUPLICATE_THRESHOLD,
+        )
+        cards_by_id = {c["id"]: c for c in cards}
+        out = []
+        for matched_name, score, card_id in matches:
+            card = cards_by_id.get(card_id)
+            if not card:
+                continue
+            out.append({
+                "id": card["id"],
+                "name": matched_name,
+                "list": self._list_id_to_name.get(card.get("idList", ""), "?"),
+                "score": int(score),
+            })
+        return out
 
     async def _get_labels_cached(self) -> list[dict]:
         """Получить метки с кешированием на 5 минут."""
@@ -222,6 +282,31 @@ class ToolExecutor:
         return result
 
     async def _create_card(self, inp: dict[str, Any]) -> dict:
+        name = inp["name"]
+        force = bool(inp.get("force", False))
+
+        # Fuzzy-проверка дублей. Источник проблемы: forward-flow stateless,
+        # а в inbox LLM экономит на get_trello_cards. Без этой защиты
+        # одна и та же задача попадает на доску по 2-3 раза.
+        if not force:
+            try:
+                candidates = await self._find_duplicate_candidates(name)
+            except Exception as e:
+                logger.warning("Fuzzy duplicate check failed: {}", e)
+                candidates = []
+            if candidates:
+                logger.info("Duplicate suspect for '{}': {}", name, candidates)
+                return {
+                    "status": "possible_duplicate",
+                    "message": (
+                        "Найдены похожие карточки. Обнови существующую "
+                        "(update_trello_card / add_trello_comment / move_trello_card / rename_trello_card). "
+                        "Если уверен, что нужна именно новая карточка — повтори "
+                        "create_trello_card с force=true."
+                    ),
+                    "candidates": candidates,
+                }
+
         # Найти label ID по имени если указан (кешированный запрос)
         labels = None
         if label_name := inp.get("label"):
@@ -231,13 +316,16 @@ class ToolExecutor:
                     labels = [lb["id"]]
                     break
 
-        return await self.trello.create_card(
-            name=inp["name"],
+        result = await self.trello.create_card(
+            name=name,
             list_name=inp.get("list_name", "Сегодня"),
             desc=inp.get("desc", ""),
             labels=labels,
             due=inp.get("due"),
         )
+        # Сбрасываем кеш — следующая проверка должна увидеть свежую карточку.
+        self._active_cards_cache = None
+        return result
 
     async def _update_card(self, inp: dict[str, Any]) -> dict:
         fields = {}
