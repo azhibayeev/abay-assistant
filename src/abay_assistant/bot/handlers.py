@@ -27,7 +27,6 @@ from abay_assistant.services.trello import TrelloClient
 from abay_assistant.services.obsidian import ObsidianClient
 from abay_assistant.services.whisper import WhisperClient
 from abay_assistant.services.calendar import CalendarClient
-from abay_assistant.bot.evening import has_active_session, handle_response as evening_handle, start_session, cancel_session
 from abay_assistant.bot.evening_voice import (
     has_active_session as voice_has_active_session,
     is_collecting as voice_is_collecting,
@@ -395,8 +394,7 @@ async def cmd_help(message: TgMessage) -> None:
         "<b>Команды:</b>\n\n"
         "/start — начать работу с ботом\n"
         "/board — обзор доски (все колонки)\n"
-        "/evening — запустить вечерний свод\n"
-        "/cancel — отменить вечерний свод / ввод заметки\n"
+        "/cancel — отменить ввод заметки CRM\n"
         "/reminders — список активных напоминаний\n"
         "/pending — незакрытые петли (мяч на стороне ≥3 дн. + просрочки + напоминания)\n"
         "/who — список людей в CRM (inline-кнопки)\n"
@@ -424,7 +422,7 @@ async def cmd_help(message: TgMessage) -> None:
 
 @router.message(F.text == "/cancel")
 async def cmd_cancel(message: TgMessage) -> None:
-    """Отменить вечерний свод или ввод заметки."""
+    """Отменить ввод заметки CRM."""
     role = await _check_access(message)
     if not role:
         return
@@ -432,8 +430,6 @@ async def cmd_cancel(message: TgMessage) -> None:
     tid = message.from_user.id
     if cancel_pending_note(tid):
         await message.answer("Ввод заметки отменён.")
-    elif cancel_session(tid):
-        await message.answer("Вечерний свод отменён.")
     else:
         await message.answer("Нет активной сессии.")
 
@@ -814,18 +810,6 @@ async def cmd_board(message: TgMessage) -> None:
         await message.answer("Ошибка загрузки доски.")
 
 
-@router.message(F.text == "/evening")
-async def cmd_evening(message: TgMessage) -> None:
-    """Запустить вечерний свод вручную."""
-    role = await _check_access(message)
-    if not role:
-        return
-
-    raw_cards = await _trello.get_cards(TrelloList.TODAY)
-    today_cards = [{"id": c["id"], "name": c["name"]} for c in raw_cards]
-    await start_session(message.from_user.id, today_cards, [])
-
-
 @router.message(F.voice)
 async def handle_voice(message: TgMessage, bot: Bot) -> None:
     """Голосовое сообщение: скачать → Whisper → обработать как текст."""
@@ -1142,11 +1126,6 @@ async def handle_text(message: TgMessage) -> None:
         result = await save_pending_note(tid, message.text)
         if result:
             await message.answer(result)
-        return
-
-    # Если идёт вечерний свод — перехватываем
-    if has_active_session(tid):
-        await evening_handle(tid, message.text)
         return
 
     await _process_inbox(message, role, message.text)

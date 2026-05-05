@@ -21,7 +21,6 @@ def _safe_scheduler_shutdown(scheduler: AsyncIOScheduler) -> None:
 from abay_assistant.config import get_settings
 from abay_assistant.db import init_db
 from abay_assistant.bot.handlers import router, setup as setup_handlers
-from abay_assistant.bot.evening import setup as setup_evening, evening_router
 from abay_assistant.bot.evening_voice import setup as setup_evening_voice, evening_voice_router
 from abay_assistant.bot.crm_browser import crm_router, setup_crm
 from abay_assistant.bot.scheduled import (
@@ -127,7 +126,6 @@ async def main() -> None:
 
     setup_handlers(llm=llm, trello=trello, obsidian=obsidian, whisper=whisper, calendar=calendar)
     setup_scheduled(bot=bot, llm=llm, trello=trello, calendar=calendar, obsidian=obsidian)
-    setup_evening(bot=bot, trello=trello, obsidian=obsidian)
     # ToolExecutor для evening_voice — отдельный инстанс, чтобы не зависеть от инициализации handlers
     from abay_assistant.tools.executor import ToolExecutor
     voice_executor = ToolExecutor(trello=trello, obsidian=obsidian, calendar=calendar)
@@ -141,7 +139,6 @@ async def main() -> None:
     scheduler.start()
 
     dp = Dispatcher()
-    dp.include_router(evening_router)
     dp.include_router(evening_voice_router)
     dp.include_router(nudge_router)
     dp.include_router(crm_router)
@@ -167,7 +164,6 @@ async def main() -> None:
         BotCommand(command="retry", description="Повторить последний запрос"),
         BotCommand(command="reminders", description="Активные напоминания"),
         BotCommand(command="pending", description="Незакрытые петли (мяч на стороне + просрочки)"),
-        BotCommand(command="evening", description="Вечерний свод"),
         BotCommand(command="stats", description="Статистика за 7 дней"),
         BotCommand(command="who", description="Найти человека в CRM"),
         BotCommand(command="project", description="Найти проект в CRM"),

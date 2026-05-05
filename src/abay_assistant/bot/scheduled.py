@@ -177,11 +177,10 @@ async def check_reminders() -> None:
 # ─────────────────────────────────────────────
 
 async def cleanup_sessions() -> None:
-    """Очистить просроченные сессии (старый интерактив + голосовой буфер)."""
+    """Очистить просроченные сессии голосового буфера."""
     try:
-        from abay_assistant.bot.evening import cleanup_expired_sessions
         from abay_assistant.bot.evening_voice import cleanup_expired as cleanup_voice_expired
-        removed = cleanup_expired_sessions() + cleanup_voice_expired()
+        removed = cleanup_voice_expired()
         if removed:
             logger.info("Очищено {} просроченных сессий", removed)
     except Exception as e:
