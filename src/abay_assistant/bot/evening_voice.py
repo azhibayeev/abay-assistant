@@ -252,13 +252,15 @@ async def _process_via_llm(session: VoiceSession) -> None:
 
 Твоя задача — из ответа Абая извлечь и выполнить:
 
-1. **Завершённые задачи** → move_trello_card в колонку «Готово».
+1. **Завершённые задачи** («сделал X», «прошла встреча с Y») → move_trello_card в колонку «ГОТОВО». Карточка из текущего списка выше — используй её ID.
 2. **Перенесённые задачи** → если упомянута дата:
-   - сегодня/завтра → колонка «Сегодня» (через update_trello_card с due)
-   - на этой неделе → колонка «Неделя»
+   - сегодня/завтра → колонка «сегодня» (через update_trello_card с due)
+   - на этой неделе → колонка «неделя»
    - дальше → нужный месяц (Май, Июнь и т.д.)
-3. **Новые задачи** (включая те, что Абай услышал из переписок WhatsApp) → create_trello_card в «Сегодня». Если упомянут ответственный — добавь через тире: «Название — Имя».
-4. **Мяч на стороне** (ждём ответа от кого-то) → move_trello_card в «Мяч на стороне», переименовать с тире и именем.
+3. **Новые задачи** (включая те, что Абай услышал из переписок WhatsApp) → create_trello_card в «сегодня». Если упомянут ответственный — добавь через тире: «Название — Имя».
+4. **Делегированные задачи** (передал X сделать Y, ждём ОТ КОГО-ТО действия) → move_trello_card в «Мяч на стороне» + rename_trello_card с ответственным через тире. НЕ путать с «прошла встреча» — это завершено, идёт в ГОТОВО.
+
+**Возможный дубль:** если create_trello_card вернул `status=possible_duplicate`, в ответе будут `candidates` — ID существующих карточек. НЕ повторяй create. Вместо этого работай с найденной карточкой: add_trello_comment / move_trello_card / update_trello_card.
 
 Если Абай сказал что-то непонятное или неактуальное для задач — пропусти, не выдумывай.
 
@@ -292,8 +294,11 @@ async def _process_via_llm(session: VoiceSession) -> None:
             for tu in tool_uses:
                 try:
                     result = await _executor.execute(tu.name, tu.input, context={"telegram_id": session.telegram_id})
-                    actions_done.append(_describe_action(tu.name, tu.input))
                     result_str = str(result) if result is not None else "OK"
+                    # NB: при возврате status=possible_duplicate карточка НЕ создана —
+                    # не записываем в actions_done, иначе fallback-сводка соврёт.
+                    if not _is_no_op_result(result_str):
+                        actions_done.append(_describe_action(tu.name, tu.input))
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tu.id,
@@ -356,6 +361,13 @@ def _escape_html(text: str) -> str:
             .replace("<", "&lt;")
             .replace(">", "&gt;")
     )
+
+
+def _is_no_op_result(result_str: str) -> bool:
+    """Результат tool, при котором действие фактически НЕ произошло — сводку не загрязнять."""
+    if not result_str:
+        return False
+    return "possible_duplicate" in result_str or result_str.startswith("Ошибка")
 
 
 def _describe_action(tool_name: str, inp: dict) -> str:
