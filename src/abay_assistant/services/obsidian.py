@@ -1,7 +1,7 @@
 """Obsidian vault клиент — CRM/knowledge graph с YAML-метаданными и автосвязями."""
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -11,6 +11,53 @@ ENTITY_FOLDERS = {
     "person": "People",
     "project": "Projects",
 }
+
+# Дедуп CRM-записей: токенизация + грубый стем по префиксу, чтобы
+# «переговорил/переговорили/переговоры» считались одним токеном без морфоанализа.
+_DEDUP_STOPWORDS = frozenset({
+    "и", "в", "на", "с", "по", "о", "а", "но", "или", "что", "как",
+    "у", "к", "из", "за", "от", "до", "это", "так", "же", "ли", "не",
+    "ну", "вот", "там", "тут", "то", "бы", "уже", "ещё", "тоже", "для",
+    "при", "под", "над", "об", "обо", "его", "её", "их", "мы",
+    "вы", "он", "она", "они", "мне", "тебе", "ему", "ей", "им",
+})
+_DEDUP_STEM_LEN = 5
+_DEDUP_OVERLAP_THRESHOLD = 0.4
+_DEDUP_WINDOW_DAYS = 3
+
+
+def _dedup_tokens(text: str) -> set[str]:
+    """Свести строку к множеству токен-стемов для приблизительного сравнения."""
+    text = re.sub(r"\[\[([^\]]+)\]\]", r"\1", text)
+    text = re.sub(r"\d{2}\.\d{2}\.\d{4}", " ", text)
+    text = re.sub(r"\d{4}-\d{2}-\d{2}", " ", text)
+    text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
+    out: set[str] = set()
+    for tok in text.lower().split():
+        if len(tok) <= 2 or tok in _DEDUP_STOPWORDS:
+            continue
+        out.add(tok[:_DEDUP_STEM_LEN])
+    return out
+
+
+def _extract_recent_entries(body: str, *, days: int) -> list[tuple[str, str]]:
+    """Достать (date, text) для блоков `### YYYY-MM-DD` за последние N дней включительно."""
+    today = datetime.now().date()
+    cutoff = today - timedelta(days=days)
+    out: list[tuple[str, str]] = []
+    pattern = re.compile(r"^###\s+(\d{4}-\d{2}-\d{2})\s*$", re.MULTILINE)
+    matches = list(pattern.finditer(body))
+    for i, m in enumerate(matches):
+        try:
+            d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if d < cutoff:
+            continue
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+        out.append((m.group(1), body[start:end].strip()))
+    return out
 
 
 def _sanitize_name(name: str) -> str:
@@ -188,17 +235,27 @@ class ObsidianClient:
             # meta всё равно обновим (last_updated, links), но новый ### блок не плодим.
             if content.strip() and content.strip() in body:
                 logger.info("Obsidian: дубль content для {} — обновлю только meta", entity_name)
-                if meta_update:
-                    for key, val in meta_update.items():
-                        if val is not None:
-                            meta[key] = val
-                meta["last_updated"] = today
-                fp.write_text(self._build_frontmatter(meta, body), encoding="utf-8")
-                rel_path = str(fp.relative_to(self.vault))
-                # обратные связи всё равно прогоним — могли появиться новые
-                links = self._extract_wiki_links(content)
-                await self._cross_link(entity_type, entity_name, links)
-                return rel_path
+                return await self._persist_meta_only(
+                    fp, meta, body, today, entity_type, entity_name, content, meta_update,
+                )
+            # Семантический дедуп в окне последних N дней: блокируем парафразы того же
+            # события, чтобы LLM не плодил повторные ### блоки одной встречи /
+            # одного итога — особенно когда выполняет действия по устаревшему контексту.
+            new_tokens = _dedup_tokens(content)
+            if new_tokens:
+                for ent_date, ent_text in _extract_recent_entries(body, days=_DEDUP_WINDOW_DAYS):
+                    old_tokens = _dedup_tokens(ent_text)
+                    if not old_tokens:
+                        continue
+                    overlap = len(new_tokens & old_tokens) / len(new_tokens | old_tokens)
+                    if overlap >= _DEDUP_OVERLAP_THRESHOLD:
+                        logger.info(
+                            "Obsidian: парафраз для {} (overlap={:.2f}, ср. запись {}) — пропуск",
+                            entity_name, overlap, ent_date,
+                        )
+                        return await self._persist_meta_only(
+                            fp, meta, body, today, entity_type, entity_name, content, meta_update,
+                        )
         else:
             # Новый файл — создаём базовую структуру
             meta = {"type": entity_type}
@@ -240,6 +297,32 @@ class ObsidianClient:
         rel_path = str(fp.relative_to(self.vault))
         logger.info("Obsidian: записано в {}", rel_path)
         return rel_path
+
+    async def _persist_meta_only(
+        self,
+        fp: Path,
+        meta: dict,
+        body: str,
+        today: str,
+        entity_type: str,
+        entity_name: str,
+        content: str,
+        meta_update: dict | None,
+    ) -> str:
+        """Записать обновлённые meta без добавления нового ### блока в тело.
+
+        Используется когда content признан дублем (точным или семантическим)
+        существующей записи — связи и last_updated всё равно прогоняем.
+        """
+        if meta_update:
+            for key, val in meta_update.items():
+                if val is not None:
+                    meta[key] = val
+        meta["last_updated"] = today
+        fp.write_text(self._build_frontmatter(meta, body), encoding="utf-8")
+        links = self._extract_wiki_links(content)
+        await self._cross_link(entity_type, entity_name, links)
+        return str(fp.relative_to(self.vault))
 
     async def _cross_link(
         self, source_type: str, source_name: str, linked_names: list[str]
