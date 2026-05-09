@@ -7,6 +7,7 @@ import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from aiogram import Router, F, Bot
 from aiogram.enums import ChatAction, ParseMode
@@ -144,10 +145,30 @@ async def _check_access(message: TgMessage) -> str | None:
     return role
 
 
+ALMATY_TZ = ZoneInfo("Asia/Almaty")
+_RU_WEEKDAYS = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+
+
+def _build_now_block(now_dt: datetime | None = None) -> str:
+    """Текущая дата/время (Asia/Almaty) + таблица weekday→date на 7 дней вперёд.
+
+    LLM плохо считает дни недели от сегодняшней даты — поэтому маппинг кладём явно.
+    """
+    if now_dt is None:
+        now_dt = datetime.now(ALMATY_TZ)
+    header = now_dt.strftime("%Y-%m-%d %H:%M (%A)")
+    lines = []
+    for i in range(1, 8):
+        d = now_dt + timedelta(days=i)
+        weekday = _RU_WEEKDAYS[d.weekday()]
+        suffix = " (завтра)" if i == 1 else ""
+        lines.append(f"- {weekday} = {d.strftime('%Y-%m-%d')}{suffix}")
+    return f"{header}\n\nКалендарь на ближайшие 7 дней (используй эти даты, не считай сам):\n" + "\n".join(lines)
+
+
 async def _build_system_prompt(role: str) -> str:
     template = PROMPT_PATH.read_text(encoding="utf-8")
-    now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
-    prompt = template.replace("{role}", role).replace("{now}", now)
+    prompt = template.replace("{role}", role).replace("{now}", _build_now_block())
 
     # Подгрузить CRM-контекст (люди + проекты)
     crm_context = await _get_crm_context()
@@ -941,10 +962,9 @@ async def _process_forward(message: TgMessage, role: str, text: str, source: str
 
     # 1. Собрать промпт
     template = FORWARD_PROMPT_PATH.read_text(encoding="utf-8")
-    now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
     system = (
         template
-        .replace("{now}", now)
+        .replace("{now}", _build_now_block())
         .replace("{role}", role)
         .replace("{forward_source}", source)
         .replace("{forward_text}", text)

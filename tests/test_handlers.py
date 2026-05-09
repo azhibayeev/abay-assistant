@@ -1,5 +1,7 @@
 """Tests for abay_assistant.bot.handlers — markdown conversion and helpers."""
 
+from datetime import datetime
+
 import pytest
 
 from abay_assistant.bot.handlers import (
@@ -10,6 +12,8 @@ from abay_assistant.bot.handlers import (
     _truncate_tool_results,
     _build_actions_summary,
     _describe_tool_action,
+    _build_now_block,
+    ALMATY_TZ,
 )
 
 
@@ -189,3 +193,55 @@ def test_build_actions_summary_with_actions():
 def test_describe_tool_action():
     assert "Расул" in _describe_tool_action("save_entity_note", {"entity_name": "Расул", "entity_type": "person", "content": "test"})
     assert _describe_tool_action("unknown_tool", {}) == "unknown_tool"
+
+
+# ─────────────────────────────────────────────
+# _build_now_block — weekday→date mapping
+# ─────────────────────────────────────────────
+
+def test_build_now_block_weekday_mapping_saturday():
+    """От субботы 2026-05-09 «вторник» = 12 мая, не 13."""
+    sat = datetime(2026, 5, 9, 17, 0, tzinfo=ALMATY_TZ)
+    block = _build_now_block(sat)
+
+    assert "2026-05-09" in block
+    assert "Saturday" in block
+    assert "- воскресенье = 2026-05-10 (завтра)" in block
+    assert "- понедельник = 2026-05-11" in block
+    assert "- вторник = 2026-05-12" in block
+    assert "- среда = 2026-05-13" in block
+    assert "- четверг = 2026-05-14" in block
+    assert "- пятница = 2026-05-15" in block
+    assert "- суббота = 2026-05-16" in block
+
+
+def test_build_now_block_weekday_mapping_monday():
+    """От понедельника 2026-05-11 «пятница» = 15 мая."""
+    mon = datetime(2026, 5, 11, 9, 30, tzinfo=ALMATY_TZ)
+    block = _build_now_block(mon)
+
+    assert "2026-05-11" in block
+    assert "Monday" in block
+    assert "- вторник = 2026-05-12 (завтра)" in block
+    assert "- среда = 2026-05-13" in block
+    assert "- пятница = 2026-05-15" in block
+    assert "- понедельник = 2026-05-18" in block
+
+
+def test_build_now_block_no_today_in_upcoming():
+    """В календаре только 7 дней вперёд, сегодняшней даты в списке нет."""
+    sat = datetime(2026, 5, 9, 12, 0, tzinfo=ALMATY_TZ)
+    block = _build_now_block(sat)
+
+    assert block.count("2026-05-09") == 1
+    assert "= 2026-05-09" not in block
+
+
+def test_build_now_block_uses_almaty_tz_by_default():
+    """Без аргумента используется Asia/Almaty, а не наивный datetime."""
+    block = _build_now_block()
+    assert "Календарь на ближайшие 7 дней" in block
+    assert any(d in block for d in _RU_WEEKDAYS_FOR_TEST)
+
+
+_RU_WEEKDAYS_FOR_TEST = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
