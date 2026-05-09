@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from abay_assistant.tools.executor import ToolExecutor
+from abay_assistant.tools.executor import ToolExecutor, normalize_for_dedup
 
 
 async def test_create_card_with_label(tool_executor, mock_trello):
@@ -332,3 +332,90 @@ async def test_create_card_invalidates_cache_on_success(tool_executor, mock_trel
     )
     parsed = json.loads(result)
     assert parsed["status"] == "possible_duplicate"
+
+
+# ── Нормализация под дедуп (склонения) ────────────────────────────────────
+
+async def test_create_card_blocks_declension_duplicate_nursultan(tool_executor, mock_trello):
+    """Регрессия: «По туризму связаться с Нурсултаном» vs «Колл по Туризму с Нурсултаном».
+
+    Без нормализации token_set_ratio = 61.9 (ниже порога 85), бот делал дубль.
+    С нормализацией стеммер сшивает «Нурсултаном»→«нурсултан», «туризму»→«туриз»,
+    score поднимается до ~89 и дубль ловится.
+    """
+    mock_trello.get_all_cards = AsyncMock(return_value=[
+        {"id": "old1", "name": "Колл по Туризму с Нурсултаном", "idList": "list_today"},
+    ])
+    result = await tool_executor.execute(
+        "create_trello_card",
+        {"name": "По туризму связаться с Нурсултаном — что можем показать"},
+    )
+    mock_trello.create_card.assert_not_awaited()
+    parsed = json.loads(result)
+    assert parsed["status"] == "possible_duplicate"
+    assert parsed["candidates"][0]["id"] == "old1"
+
+
+async def test_create_card_returns_original_name_not_normalized(tool_executor, mock_trello):
+    """В ответе кандидата — оригинальное название с пунктуацией и регистром."""
+    mock_trello.get_all_cards = AsyncMock(return_value=[
+        {"id": "old1", "name": "Колл по Туризму с Нурсултаном", "idList": "list_today"},
+    ])
+    result = await tool_executor.execute(
+        "create_trello_card",
+        {"name": "По туризму связаться с Нурсултаном"},
+    )
+    parsed = json.loads(result)
+    assert parsed["candidates"][0]["name"] == "Колл по Туризму с Нурсултаном"
+
+
+async def test_create_card_does_not_merge_unrelated_baltabek_kenes(tool_executor, mock_trello):
+    """Контроль ложных срабатываний: разные люди + общий «аға» не должны срастаться."""
+    mock_trello.get_all_cards = AsyncMock(return_value=[
+        {"id": "old1", "name": "Заехать к Кенес аға", "idList": "list_today"},
+    ])
+    result = await tool_executor.execute(
+        "create_trello_card",
+        {"name": "Встреча с Балтабек аға"},
+    )
+    mock_trello.create_card.assert_awaited_once()
+
+
+async def test_create_card_does_not_merge_blumberg_pair(tool_executor, mock_trello):
+    """«Сесть по Блумберг» (подготовка) и «Колл по Блумбергу» (звонок) — разные задачи.
+
+    Без порога 85 они бы схлопнулись (token_set_ratio после стемминга ~85),
+    но 85 ровно — на границе. Защищает от ложного слияния этой пары.
+    """
+    mock_trello.get_all_cards = AsyncMock(return_value=[
+        {"id": "old1", "name": "сесть по Блумберг", "idList": "list_today"},
+    ])
+    result = await tool_executor.execute(
+        "create_trello_card",
+        {"name": "Колл по Блумбергу"},
+    )
+    mock_trello.create_card.assert_awaited_once()
+
+
+# ── normalize_for_dedup ────────────────────────────────────
+
+def test_normalize_strips_punctuation_and_lowercases():
+    assert normalize_for_dedup("Колл по Туризму, с Нурсултаном!") == normalize_for_dedup("колл по туризму с нурсултаном")
+
+
+def test_normalize_stems_russian_endings():
+    """«Нурсултаном» и «Нурсултан» должны давать одинаковый токен."""
+    a = normalize_for_dedup("Нурсултаном")
+    b = normalize_for_dedup("Нурсултан")
+    assert a == b
+
+
+def test_normalize_handles_empty_input():
+    assert normalize_for_dedup("") == ""
+    assert normalize_for_dedup(None) == ""
+
+
+def test_normalize_keeps_short_words_intact():
+    """Слова короче 4 букв стеммер не трогает."""
+    assert "вг" in normalize_for_dedup("ВГ")
+    assert "тм" in normalize_for_dedup("ТМ")

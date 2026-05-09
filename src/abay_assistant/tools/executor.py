@@ -1,6 +1,7 @@
 """Исполнитель tool calls от Claude."""
 
 import json
+import re
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -19,6 +20,39 @@ DUPLICATE_THRESHOLD = 85
 FIND_THRESHOLD = 50  # для find_trello_card — порог ниже, потому что это поиск, а не дедуп
 # Колонки, в которых не ищем дубли — туда уходит уже отработанное.
 EXCLUDED_LIST_NAMES = frozenset({"архив", "готово"})
+
+# Нормализация для дедупа: режем русские окончания, чтобы «Нурсултаном» и
+# «Нурсултан» считались одним токеном. Без этого token_set_ratio сильно
+# проседает на склонениях (см. кейс «По туризму связаться с Нурсултаном» vs
+# «Колл по Туризму с Нурсултаном» — 61 без норм., 89 с норм.).
+_DEDUP_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+_DEDUP_SPACES_RE = re.compile(r"\s+")
+# Длинные окончания первыми — иначе «ого» съест «о», не доходя до «ого».
+_DEDUP_ENDINGS = (
+    "ами", "ями", "ого", "его", "ому", "ему", "ыми", "ими",
+    "ах", "ях", "ам", "ям", "ом", "ем", "ой", "ей", "ую", "юю",
+    "ая", "яя", "ые", "ие", "ый", "ий", "ое", "ее", "ов", "ев",
+    "ть", "ся", "ал", "ил", "ел", "ла", "ло", "ли", "ну",
+    "ы", "и", "а", "я", "у", "ю", "е", "о", "м", "х",
+)
+
+
+def _stem_ru(word: str) -> str:
+    """Грубо обрезать русское окончание. Не лингвистический стеммер — эвристика для дедупа."""
+    if len(word) < 4:
+        return word
+    for end in _DEDUP_ENDINGS:
+        if word.endswith(end) and len(word) - len(end) >= 3:
+            return word[: -len(end)]
+    return word
+
+
+def normalize_for_dedup(text: str) -> str:
+    """Нормализовать строку для fuzzy-сравнения: lowercase, без пунктуации, со стеммингом."""
+    text = (text or "").lower()
+    text = _DEDUP_PUNCT_RE.sub(" ", text)
+    text = _DEDUP_SPACES_RE.sub(" ", text).strip()
+    return " ".join(_stem_ru(w) for w in text.split() if w)
 
 
 def summarize_tool_args(tool_name: str, inp: dict[str, Any]) -> str:
@@ -111,29 +145,42 @@ class ToolExecutor:
         return self._active_cards_cache
 
     async def _find_duplicate_candidates(self, name: str) -> list[dict]:
-        """Карточки с fuzzy-сходством >= DUPLICATE_THRESHOLD к данному имени."""
+        """Карточки с fuzzy-сходством >= DUPLICATE_THRESHOLD к данному имени.
+
+        Сравнивает на нормализованных строках (стемминг русских окончаний),
+        но возвращает оригинальные названия — чтобы LLM видела понятный текст.
+        """
         cards = await self._get_active_cards_cached()
         if not cards:
             return []
-        choices = {c["id"]: c.get("name", "") for c in cards if c.get("name")}
-        if not choices:
+        # id → (normalized_name, original_name)
+        choices_norm: dict[str, str] = {}
+        original_by_id: dict[str, str] = {}
+        for c in cards:
+            orig = c.get("name") or ""
+            if not orig:
+                continue
+            choices_norm[c["id"]] = normalize_for_dedup(orig)
+            original_by_id[c["id"]] = orig
+        if not choices_norm:
             return []
+        query_norm = normalize_for_dedup(name)
         matches = process.extract(
-            name,
-            choices,
+            query_norm,
+            choices_norm,
             scorer=fuzz.token_set_ratio,
             limit=3,
             score_cutoff=DUPLICATE_THRESHOLD,
         )
         cards_by_id = {c["id"]: c for c in cards}
         out = []
-        for matched_name, score, card_id in matches:
+        for _matched_norm, score, card_id in matches:
             card = cards_by_id.get(card_id)
             if not card:
                 continue
             out.append({
                 "id": card["id"],
-                "name": matched_name,
+                "name": original_by_id.get(card_id, ""),
                 "list": self._list_id_to_name.get(card.get("idList", ""), "?"),
                 "score": int(score),
             })
