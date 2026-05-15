@@ -1361,6 +1361,27 @@ def _find_month_list_name(list_names: list[str], target_month: int) -> str | Non
     return None
 
 
+def _is_sort_managed(list_name: str) -> bool:
+    """Принадлежит ли колонка дате-сортировке.
+
+    Sort трогает только дате-колонки (сегодня / неделя / месяц / в следующем году).
+    Кастомные колонки (update, Backlog, Мяч на стороне, Изучить, ГОТОВО, архив, любые
+    пользовательские) — не трогаем, даже если у карточки есть due.
+    """
+    lower = list_name.lower().strip()
+    if lower == str(TrelloList.TODAY).lower():
+        return True
+    if lower.startswith(str(TrelloList.WEEK).lower()):
+        return True
+    if "следующ" in lower:
+        return True
+    # Месяц — слово целиком (\b), чтобы «Майский план» не считался колонкой мая
+    for m in _MONTH_NAMES_LOWER.values():
+        if re.search(rf"\b{m}\b", lower):
+            return True
+    return False
+
+
 # ─────────────────────────────────────────────
 # Ежедневно 8:30 — Авто-сортировка карточек
 # ─────────────────────────────────────────────
@@ -1392,9 +1413,9 @@ async def sort_cards_by_due() -> None:
 
             card_list = id_to_name.get(card.get("idList"), "")
 
-            # Не перемещать из "Готово", "Мяч на стороне", "Изучить"
-            skip_lists = ("готово", "мяч на стороне", "изучить")
-            if any(s in card_list.lower() for s in skip_lists):
+            # Sort трогает только дате-колонки. Кастомные (update, Backlog, ГОТОВО,
+            # Мяч на стороне, Изучить, архив, любые пользовательские) — не трогаем.
+            if not _is_sort_managed(card_list):
                 continue
 
             target = _classify_due_date(due)

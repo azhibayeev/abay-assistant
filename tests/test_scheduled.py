@@ -15,6 +15,7 @@ from abay_assistant.bot.scheduled import (
     _classify_due_date,
     _format_week_name,
     _find_month_list_name,
+    _is_sort_managed,
 )
 
 
@@ -241,6 +242,53 @@ def test_classify_due_date_future_month():
     if future <= date.today():
         return  # skip if December has passed
     assert _classify_due_date(future.isoformat()).startswith("month:")
+
+
+# ─────────────────────────────────────────────
+# _is_sort_managed — регрессия на «sort вытащил карточки из update/архива»
+# ─────────────────────────────────────────────
+
+def test_is_sort_managed_today():
+    assert _is_sort_managed("сегодня") is True
+    assert _is_sort_managed("Сегодня") is True
+
+
+def test_is_sort_managed_week():
+    assert _is_sort_managed("неделя 11 – 17 мая") is True
+    assert _is_sort_managed("Неделя 27– 3 май.") is True
+
+
+def test_is_sort_managed_months():
+    for month in ("Май", "Июнь", "Июль", "Декабрь"):
+        assert _is_sort_managed(month) is True
+    assert _is_sort_managed("Май 2026") is True
+
+
+def test_is_sort_managed_next_year():
+    assert _is_sort_managed("В следующем году") is True
+
+
+def test_is_sort_managed_custom_columns_are_skipped():
+    """Регрессия 2026-05-15: sort_cards_by_due вытащил 15 карточек из update/архива в Сегодня."""
+    # Эти колонки sort трогать не должен — даже если у карточки есть due
+    for name in (
+        "update",
+        "Backlog",
+        "Мяч на стороне",
+        "Изучить",
+        "ГОТОВО",
+        "Готово",
+        "архив",
+        "Архив",
+    ):
+        assert _is_sort_managed(name) is False, f"{name!r} не должен быть sort-managed"
+
+
+def test_is_sort_managed_no_false_month_match():
+    """Колонка не должна попасть в sort из-за случайного вхождения месяца как подстроки."""
+    # "уважение" содержит "май" как подстроку, но это не колонка месяца
+    assert _is_sort_managed("уважение") is False
+    assert _is_sort_managed("Майский план") is False  # "май" — префикс другого слова
 
 
 def test_classify_due_date_next_year():

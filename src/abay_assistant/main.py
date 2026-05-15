@@ -82,30 +82,32 @@ def setup_scheduler(scheduler: AsyncIOScheduler) -> None:
     scheduler.add_job(weekly_report, "cron", day_of_week="sun", hour=21, minute=0)
     # Воскресенье 20:00 — забытые контакты
     scheduler.add_job(forgotten_contacts, "cron", day_of_week="sun", hour=20, minute=0)
-    # Понедельник 0:10 — обновить названия колонок (неделя + месяц)
-    scheduler.add_job(update_list_names, "cron", day_of_week="mon", hour=0, minute=10)
-    # Понедельник 0:15 — перенос карточек с прошлой недели
-    scheduler.add_job(weekly_carryover, "cron", day_of_week="mon", hour=0, minute=15)
+    # ОТКЛЮЧЕНО 2026-05-15: автомутации Trello на паузе до ревизии
+    # # Понедельник 0:10 — обновить названия колонок (неделя + месяц)
+    # scheduler.add_job(update_list_names, "cron", day_of_week="mon", hour=0, minute=10)
+    # # Понедельник 0:15 — перенос карточек с прошлой недели
+    # scheduler.add_job(weekly_carryover, "cron", day_of_week="mon", hour=0, minute=15)
     # Каждые 60 секунд — проверка напоминаний
     scheduler.add_job(check_reminders, "interval", seconds=60)
     # Каждые 10 минут — очистка зависших вечерних сессий
     scheduler.add_job(cleanup_sessions, "interval", minutes=10)
     # Каждые 5 минут — напоминание о встречах + CRM-контекст
     scheduler.add_job(meeting_prep, "interval", minutes=5)
-    # Каждый день 8:30 — авто-сортировка карточек по дедлайну
-    scheduler.add_job(sort_cards_by_due, "cron", hour=8, minute=30)
-    # Каждый день 8:50 — автоматическая чистка доски (дубли + обложки)
-    scheduler.add_job(board_cleanup, "cron", hour=8, minute=50)
+    # ОТКЛЮЧЕНО 2026-05-15: автомутации Trello на паузе до ревизии
+    # # Каждый день 8:30 — авто-сортировка карточек по дедлайну
+    # scheduler.add_job(sort_cards_by_due, "cron", hour=8, minute=30)
+    # # Каждый день 8:50 — автоматическая чистка доски (дубли + обложки)
+    # scheduler.add_job(board_cleanup, "cron", hour=8, minute=50)
     # Каждый день 4:00 — snapshot CRM (резервная копия vault, хранит 30 дней)
     scheduler.add_job(crm_snapshot, "cron", hour=4, minute=0)
     # Каждый день 9:30 — pattern detection (после утренней сводки)
     scheduler.add_job(pattern_check, "cron", hour=9, minute=30)
     logger.info(
-        "Расписание: 4:00 snapshot, 8:30 sort, 8:50 cleanup, 9:00 утро, "
-        "9:30 patterns, 11:00 waiting-ping, 16:00 nudge, 20:00 stuck, "
+        "Расписание: 4:00 snapshot, 9:00 утро, 9:30 patterns, "
+        "11:00 waiting-ping, 16:00 nudge, 20:00 stuck, "
         "21:00 summary, 22:30 вечер, "
-        "пн 0:10 list-names, пн 0:15 carryover, "
-        "вс 20:00 контакты, вс 21:00 weekly, meeting_prep/5мин, напоминания/60с (Asia/Almaty)"
+        "вс 20:00 контакты, вс 21:00 weekly, meeting_prep/5мин, напоминания/60с (Asia/Almaty) "
+        "[ВЫКЛ: sort/cleanup/carryover/list-names — автомутации Trello на паузе]"
     )
 
 
